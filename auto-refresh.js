@@ -26,10 +26,8 @@
   const USER_ENABLED_KEY = "udacityMentorAutoRefreshEnabled";
   const USER_ENABLED_EVENT = "udacity-tools:auto-refresh-enabled";
   const STORAGE_VERSION = 1;
-  const ENABLE_DOM_OBSERVER = false;
 
   let timeoutId = null;
-  let observer = null;
   let resumeIntervalId = null;
   let stopped = false;
   let lastRunAtMs = null;
@@ -396,19 +394,6 @@
     enforceUserSetting("enabled in popup");
     if (!stopped) scheduleNextTick();
     else startResumeWatcher();
-
-    // Optional observer path is disabled by default to avoid CPU churn on heavy pages.
-    if (ENABLE_DOM_OBSERVER) {
-      observer = new MutationObserver(() => {
-        if (enforceUserSetting("enabled in popup")) return;
-        if (stopped) {
-          maybeResume("DOM update");
-          return;
-        }
-        if (shouldStop()) stop(STOP_REASON_REVIEWS_REFRESH_MISSING);
-      });
-      observer.observe(document.documentElement, { childList: true, subtree: true });
-    }
 
     // Best-effort persistence on refresh/close.
     window.addEventListener("beforeunload", () => {
