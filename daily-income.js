@@ -685,6 +685,46 @@
     return true;
   }
 
+  function scoreDiscoveredApiUrl(url, type, candidate = null) {
+    if (!isUsableApiEndpointUrl(url)) return -Infinity;
+    const lower = String(url).toLowerCase();
+    let score = 0;
+    if (type === 'review') {
+      if (lower.includes('review')) score += 80;
+      if (lower.includes('/submissions/completed')) score += 500;
+      if (lower.includes('completed')) score += 200;
+      if (lower.includes('history')) score += 80;
+      score += Number(candidate?.reviewItems || 0);
+    } else if (type === 'question') {
+      if (lower.includes('question')) score += 80;
+      if (lower.includes('completed')) score += 180;
+      if (lower.includes('history')) score += 80;
+      score += Number(candidate?.questionItems || 0);
+    }
+    return score;
+  }
+
+  function pickDiscoveredApiUrl(discovery, type) {
+    const choices = [];
+    const direct = discovery?.endpoints?.[type === 'review' ? 'reviews' : 'questions'];
+    if (direct) choices.push({ url: String(direct), candidate: null });
+    const candidates = Array.isArray(discovery?.candidates) ? discovery.candidates : [];
+    for (const c of candidates) {
+      if (!c || !c.url) continue;
+      choices.push({ url: String(c.url), candidate: c });
+    }
+    let best = null;
+    let bestScore = -Infinity;
+    for (const entry of choices) {
+      const s = scoreDiscoveredApiUrl(entry.url, type, entry.candidate);
+      if (s > bestScore) {
+        bestScore = s;
+        best = entry.url;
+      }
+    }
+    return bestScore > -Infinity ? best : null;
+  }
+
   function loadCache() {
     try {
       const raw = localStorage.getItem(CACHE_KEY);
@@ -1231,11 +1271,13 @@
                 d.candidates = d.candidates.slice(0, 25);
 
                 // Prefer endpoints that actually look like LISTS (avoid single-item responses).
-                // Pick the endpoint with the highest count seen so far.
-                if (summary.reviewItems >= 3 && summary.reviewItems >= (d.best.reviews || 0)) {
-                  d.best.reviews = summary.reviewItems;
+                // Pick the endpoint with the highest score and never keep known false positives.
+                const reviewScore = scoreDiscoveredApiUrl(url, 'review', { reviewItems: summary.reviewItems });
+                const currentReviewScore = scoreDiscoveredApiUrl(d.endpoints.reviews, 'review', { reviewItems: d.best.reviews || 0 });
+                if (reviewScore > -Infinity && summary.reviewItems >= 3 && reviewScore >= currentReviewScore) {
+                  d.best.reviews = Math.max(d.best.reviews || 0, summary.reviewItems);
                   d.endpoints.reviews = url;
-                } else if (inferredType === 'review' && !d.endpoints.reviews && !String(url).toLowerCase().includes('certifications')) {
+                } else if (inferredType === 'review' && reviewScore > -Infinity && (!d.endpoints.reviews || !isUsableApiEndpointUrl(d.endpoints.reviews))) {
                   // If the URL clearly looks like the reviews endpoint but there are too few/zero items,
                   // still record it so API pagination can work.
                   d.endpoints.reviews = url;
@@ -1309,10 +1351,12 @@
                   });
                   d.candidates = d.candidates.slice(0, 25);
 
-                  if (summary.reviewItems >= 3 && summary.reviewItems >= (d.best.reviews || 0)) {
-                    d.best.reviews = summary.reviewItems;
+                  const reviewScore = scoreDiscoveredApiUrl(_url, 'review', { reviewItems: summary.reviewItems });
+                  const currentReviewScore = scoreDiscoveredApiUrl(d.endpoints.reviews, 'review', { reviewItems: d.best.reviews || 0 });
+                  if (reviewScore > -Infinity && summary.reviewItems >= 3 && reviewScore >= currentReviewScore) {
+                    d.best.reviews = Math.max(d.best.reviews || 0, summary.reviewItems);
                     d.endpoints.reviews = _url;
-                  } else if (inferredType === 'review' && !d.endpoints.reviews && !String(_url).toLowerCase().includes('certifications')) {
+                  } else if (inferredType === 'review' && reviewScore > -Infinity && (!d.endpoints.reviews || !isUsableApiEndpointUrl(d.endpoints.reviews))) {
                     d.endpoints.reviews = _url;
                   }
                   if (summary.questionItems >= 3 && summary.questionItems >= (d.best.questions || 0)) {
@@ -2296,22 +2340,79 @@
         if (lastStatus === 'error' && !lastBackgroundError) {
           lastBackgroundError = 'History data loaded, but could not locate expected rows.';
         }
-        if (lastStatus === 'ready') {
-          lastDataSource = 'history';
-          const rp = reviews?.pages || 1;
-          const qp = questions?.pages || 1;
-          lastPagingInfo = `Paged History: R ${rp}p, Q ${qp}p.`;
-          lastApiFailure = '';
-          saveDayCache(dayKey, {
-            reviews: reviews.sum,
-            questions: questions.sum,
-            countedReviews: reviews.rowsCounted,
-            countedQuestions: questions.rowsCounted,
-          });
-        }
-        render({ reviews, questions, note: '' });
-        return;
-      }
+	        if (lastStatus === 'ready') {
+	          const rp = reviews?.pages || 1;
+	          const qp = questions?.pages || 1;
+	          let reviewsOut = reviews;
+	          let questionsOut = questions;
+	          let payloadOut = {
+	            reviews: reviews.sum,
+	            questions: questions.sum,
+	            countedReviews: reviews.rowsCounted,
+	            countedQuestions: questions.rowsCounted,
+	          };
+	          let usedApiFallback = false;
+	          let apiReviewPages = 0;
+	          let apiQuestionPages = 0;
+	          let apiIncomplete = false;
+
+	          const historyLikelyTruncated =
+	            ((rp <= 1) && reviews.rowsSeen >= 15 && reviews.rowsCounted === reviews.rowsSeen) ||
+	            ((qp <= 1) && questions.rowsSeen >= 15 && questions.rowsCounted === questions.rowsSeen);
+
+	          if (historyLikelyTruncated && (force || Date.now() - lastApiFetchAt >= 12_000)) {
+	            const reviewUrl = pickDiscoveredApiUrl(discovery, 'review');
+	            const questionUrl = pickDiscoveredApiUrl(discovery, 'question');
+	            const urls = [
+	              reviewUrl ? { type: 'review', url: reviewUrl } : null,
+	              questionUrl ? { type: 'question', url: questionUrl } : null,
+	            ].filter(Boolean);
+	            if (urls.length) {
+	              try {
+	                lastApiFetchAt = Date.now();
+	                let apiItems = [];
+	                for (const entry of urls) {
+	                  const paged = await fetchItemsForDayPaginated({ url: entry.url, type: entry.type, targetDayParts: targetDay });
+	                  apiItems = apiItems.concat(paged.items);
+	                  if (entry.type === 'review') apiReviewPages = paged.pagesFetched || 0;
+	                  if (entry.type === 'question') apiQuestionPages = paged.pagesFetched || 0;
+	                  if (paged.stoppedBecauseNoNext && paged.lastPageHadTarget) apiIncomplete = true;
+	                }
+	                const apiTotals = computeTotalsFromItems(apiItems, targetDay);
+	                if (shouldOverwriteDayCache(payloadOut, apiTotals)) {
+	                  usedApiFallback = true;
+	                  payloadOut = apiTotals;
+	                  reviewsOut = {
+	                    ...reviews,
+	                    sum: apiTotals.reviews,
+	                    rowsCounted: apiTotals.countedReviews,
+	                    rowsSeen: Math.max(reviews.rowsSeen || 0, apiTotals.countedReviews || 0),
+	                  };
+	                  questionsOut = {
+	                    ...questions,
+	                    sum: apiTotals.questions,
+	                    rowsCounted: apiTotals.countedQuestions,
+	                    rowsSeen: Math.max(questions.rowsSeen || 0, apiTotals.countedQuestions || 0),
+	                  };
+	                }
+	              } catch (_) {
+	                // Keep history totals if API fallback fails.
+	              }
+	            }
+	          }
+
+	          lastDataSource = usedApiFallback ? 'api' : 'history';
+	          lastPagingInfo = usedApiFallback
+	            ? `Paged History: R ${rp}p, Q ${qp}p. Paged API: R ${apiReviewPages || 1}p, Q ${apiQuestionPages || 1}p${apiIncomplete ? ' (may be missing more—no next link found)' : ''}.`
+	            : `Paged History: R ${rp}p, Q ${qp}p.`;
+	          lastApiFailure = '';
+	          saveDayCache(dayKey, payloadOut);
+	          render({ reviews: reviewsOut, questions: questionsOut, note: '' });
+	          return;
+	        }
+	        render({ reviews, questions, note: '' });
+	        return;
+	      }
 
       // Best path (no History visit needed *after initial discovery*):
       // call the discovered API endpoints directly and compute totals.
@@ -2331,10 +2432,12 @@
             note: 'Loading totals from API…',
           });
 
-          const urls = [
-            isUsableApiEndpointUrl(discovery.endpoints.reviews) ? { type: 'review', url: discovery.endpoints.reviews } : null,
-            isUsableApiEndpointUrl(discovery.endpoints.questions) ? { type: 'question', url: discovery.endpoints.questions } : null,
-          ].filter(Boolean);
+	          const reviewUrl = pickDiscoveredApiUrl(discovery, 'review');
+	          const questionUrl = pickDiscoveredApiUrl(discovery, 'question');
+	          const urls = [
+	            reviewUrl ? { type: 'review', url: reviewUrl } : null,
+	            questionUrl ? { type: 'question', url: questionUrl } : null,
+	          ].filter(Boolean);
 
           let items = [];
           let reviewPages = 0;
