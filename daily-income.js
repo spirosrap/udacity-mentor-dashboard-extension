@@ -40,10 +40,12 @@
   const DEFAULT_BOTTOM_PX = 14;
   const ANCHOR_GAP_PX = 14;
   const SAFE_FALLBACK_CLEARANCE_PX = 70;
-  const MIN_RECOMPUTE_INTERVAL_MS = 8000;
+  const NON_HISTORY_MIN_RECOMPUTE_INTERVAL_MS = 8000;
+  const HISTORY_MIN_RECOMPUTE_INTERVAL_MS = 1200;
   const ANCHOR_SCAN_TTL_MS = 8000;
   const POSITION_RECALC_TTL_MS = 1500;
-  const MUTATION_RECOMPUTE_MIN_DELAY_MS = 2000;
+  const NON_HISTORY_MUTATION_RECOMPUTE_MIN_DELAY_MS = 2000;
+  const HISTORY_MUTATION_RECOMPUTE_MIN_DELAY_MS = 350;
   let lastPositionRecalcAt = 0;
   let anchorScanCacheAt = 0;
   let anchorScanCacheEl = null;
@@ -560,6 +562,18 @@
 
   function isHistoryRoute() {
     return window.location.pathname.includes('/queue/history');
+  }
+
+  function getRecomputeThrottleMs() {
+    return isHistoryRoute()
+      ? HISTORY_MIN_RECOMPUTE_INTERVAL_MS
+      : NON_HISTORY_MIN_RECOMPUTE_INTERVAL_MS;
+  }
+
+  function getMutationRecomputeDelayMs() {
+    return isHistoryRoute()
+      ? HISTORY_MUTATION_RECOMPUTE_MIN_DELAY_MS
+      : NON_HISTORY_MUTATION_RECOMPUTE_MIN_DELAY_MS;
   }
 
   function loadDiscovery() {
@@ -2149,7 +2163,7 @@
 
   async function recomputeAndRender({ force = false } = {}) {
     if (!isDailyIncomeEnabled()) return;
-    if (!force && lastRecomputeFinishedAt && Date.now() - lastRecomputeFinishedAt < MIN_RECOMPUTE_INTERVAL_MS) {
+    if (!force && lastRecomputeFinishedAt && Date.now() - lastRecomputeFinishedAt < getRecomputeThrottleMs()) {
       return;
     }
     if (recomputeInFlight) {
@@ -2443,7 +2457,7 @@
     if (pending) return;
     const delay = immediate
       ? 0
-      : (source === 'mutation' ? MUTATION_RECOMPUTE_MIN_DELAY_MS : 250);
+      : (source === 'mutation' ? getMutationRecomputeDelayMs() : 250);
     pending = window.setTimeout(() => {
       pending = null;
       recomputeAndRender({ force: immediate });
@@ -2470,7 +2484,7 @@
     ensureBar();
 
     // Fire-and-forget initial compute (async safe).
-    recomputeAndRender().catch(() => {});
+    recomputeAndRender({ force: isHistoryRoute() }).catch(() => {});
 
     if (!bodyObserverInstalled) {
       bodyObserverInstalled = true;
@@ -2500,12 +2514,15 @@
     // Quick warm-up loop to catch iframe load ASAP, then settle into 60s.
     if (!warmupInstalled) {
       warmupInstalled = true;
+      const historyWarmup = isHistoryRoute();
+      const warmupLimit = historyWarmup ? 8 : 6;
+      const warmupEveryMs = historyWarmup ? 500 : 1000;
       let warmupTicks = 0;
       const warmup = window.setInterval(() => {
         warmupTicks += 1;
         scheduleRecompute();
-        if (warmupTicks >= 6) window.clearInterval(warmup); // ~6s
-      }, 1000);
+        if (warmupTicks >= warmupLimit) window.clearInterval(warmup);
+      }, warmupEveryMs);
       window.setInterval(() => scheduleRecompute(), 60_000);
     }
   }

@@ -73,11 +73,11 @@
   function isUserEnabled() {
     try {
       const raw = window.localStorage.getItem(USER_ENABLED_KEY);
-      if (raw == null) return false;
+      if (raw == null) return true;
       const normalized = String(raw).trim().toLowerCase();
       return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
     } catch {
-      return false;
+      return true;
     }
   }
 
@@ -389,9 +389,8 @@
     );
     loadPersistedState();
 
-    // If there was an existing schedule, keep it across reloads; otherwise schedule initial tick.
-    if (typeof nextRunAtMs !== "number") nextRunAtMs = Date.now() + START_DELAY_MS;
-    if (nextRunAtMs <= Date.now()) nextRunAtMs = Date.now() + 750; // run soon if overdue
+    // Reset schedule on each page load so a manual refresh restarts the countdown.
+    nextRunAtMs = Date.now() + START_DELAY_MS;
     renderBadge(stopped ? "Paused (waiting for queue)" : "Scheduled");
     persistState();
     enforceUserSetting("enabled in popup");
@@ -421,6 +420,8 @@
     window.addEventListener(USER_ENABLED_EVENT, () => {
       enforceUserSetting("popup toggle");
     });
+    // Bridge storage sync can land slightly after this script starts.
+    window.setTimeout(() => enforceUserSetting("startup sync"), 1200);
   }
 
   start();

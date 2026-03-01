@@ -11,7 +11,7 @@
     dailyIncomeEnabled: false,
     hideIncomeBox: false,
     hideAutoRefreshBox: false,
-    autoRefreshEnabled: false,
+    autoRefreshEnabled: true,
   });
 
   function hasOwn(obj, key) {
