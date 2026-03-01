@@ -52,6 +52,27 @@ h2 {
   word-break: break-word;
 }
 
+.debug-wrap {
+  margin-top: 8px;
+}
+
+.debug-wrap > summary {
+  cursor: pointer;
+  color: #9fb3cc;
+  user-select: none;
+}
+
+.debug-wrap[open] > summary {
+  margin-bottom: 6px;
+}
+
+.debug-text {
+  margin-top: 0;
+  font-size: 12px;
+  max-height: 130px;
+  overflow: auto;
+}
+
 .toggle {
   display: flex;
   align-items: center;

@@ -9,7 +9,9 @@ const elIncomeQuestions = document.getElementById("income-questions");
 const elIncomeTotal = document.getElementById("income-total");
 const elIncomeStatus = document.getElementById("income-status");
 const elIncomeDate = document.getElementById("income-date");
-const elIncomeDetails = document.getElementById("income-details");
+const elIncomeSummary = document.getElementById("income-summary");
+const elIncomeDebugWrap = document.getElementById("income-debug-wrap");
+const elIncomeDebug = document.getElementById("income-debug");
 const elToggleDailyIncomeEnabled = document.getElementById("toggle-daily-income-enabled");
 const elAutoRefreshText = document.getElementById("auto-refresh-text");
 const elToggleAutoRefreshEnabled = document.getElementById("toggle-auto-refresh-enabled");
@@ -29,13 +31,23 @@ function normalizeMultiline(text) {
   return trimmed.replace(/\s*\n\s*/g, " | ");
 }
 
+function summarizeIncomeMeta(meta) {
+  const text = (meta || "").trim();
+  if (!text) return "-";
+  const idx = text.indexOf(" Endpoints:");
+  if (idx === -1) return text;
+  return text.slice(0, idx).trim();
+}
+
 function setIncomeUnavailable() {
   elIncomeReviews.textContent = "-";
   elIncomeQuestions.textContent = "-";
   elIncomeTotal.textContent = "-";
   elIncomeStatus.textContent = "-";
   elIncomeDate.textContent = "-";
-  elIncomeDetails.textContent = "Daily Income box not detected on this tab.";
+  elIncomeSummary.textContent = "Daily Income box not detected on this tab.";
+  elIncomeDebug.textContent = "-";
+  elIncomeDebugWrap.open = false;
 }
 
 function setAutoRefreshUnavailable() {
@@ -58,7 +70,9 @@ function renderFromState(state) {
     elIncomeTotal.textContent = income.total || "-";
     elIncomeStatus.textContent = income.status || "-";
     elIncomeDate.textContent = income.targetDate || "-";
-    elIncomeDetails.textContent = income.meta || "-";
+    const fullMeta = (income.meta || "").trim();
+    elIncomeSummary.textContent = summarizeIncomeMeta(fullMeta);
+    elIncomeDebug.textContent = fullMeta || "-";
   } else {
     setIncomeUnavailable();
   }
