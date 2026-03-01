@@ -36,3 +36,4 @@ This extension combines both scripts into one package and adds a popup UI:
 - Low-load defaults: Daily Income starts disabled; Auto Refresh starts enabled.
 - Auto Refresh countdown resets when you manually reload the page.
 - Daily Income parsing now handles rows with multiple dollar amounts (for example payout + bonus) more accurately.
+- History parsing now reads semantic grid rows (`role=row`) with fallback logic, reducing missed entries when row action labels vary.

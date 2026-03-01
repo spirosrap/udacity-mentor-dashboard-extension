@@ -52,17 +52,29 @@
 
   const MONTHS = Object.freeze({
     january: 1,
+    jan: 1,
     february: 2,
+    feb: 2,
     march: 3,
+    mar: 3,
     april: 4,
+    apr: 4,
     may: 5,
     june: 6,
+    jun: 6,
     july: 7,
+    jul: 7,
     august: 8,
+    aug: 8,
     september: 9,
+    sep: 9,
+    sept: 9,
     october: 10,
+    oct: 10,
     november: 11,
+    nov: 11,
     december: 12,
+    dec: 12,
   });
 
   function hasDomScaffold() {
@@ -246,7 +258,7 @@
   function parseMonthDayYear(text) {
     // Expected like: "January 23, 2026"
     if (!text) return null;
-    const m = String(text).trim().match(/^([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})$/);
+    const m = String(text).trim().match(/^([A-Za-z]+)\.?\s+(\d{1,2}),\s*(\d{4})$/);
     if (!m) return null;
     const monthName = m[1].toLowerCase();
     const month = MONTHS[monthName];
@@ -317,6 +329,27 @@
       }
     }
     return rows;
+  }
+
+  function getSectionRowsIn(doc, { startHeadingText, endHeadingText, rowTerminatorRe }) {
+    const start = findHeadingByTextIn(doc, startHeadingText);
+    if (!start) return [];
+    const end = endHeadingText ? findHeadingByTextIn(doc, endHeadingText) : null;
+
+    // Prefer semantic rows from the grid; this is more reliable than link-text terminators.
+    const allRows = Array.from(doc.querySelectorAll('[role="row"]'));
+    const scopedRows = nodesBetween(start, end, allRows);
+    const semanticRows = scopedRows
+      .map((rowEl) => Array.from(rowEl.querySelectorAll('[role="gridcell"]'))
+        .map((cell) => (cell.textContent || '').trim())
+        .filter(Boolean))
+      .filter((cells) => cells.length > 0);
+    if (semanticRows.length) return semanticRows;
+
+    // Fallback for unexpected DOM structures.
+    const allCells = Array.from(doc.querySelectorAll('[role="gridcell"]'));
+    const scopedCells = nodesBetween(start, end, allCells);
+    return splitRowsByTerminator(scopedCells, rowTerminatorRe || /^View (review|question)$/i);
   }
 
   function isDisabledish(el) {
@@ -404,11 +437,8 @@
   async function waitForSectionRows(doc, sectionCfg, rowTerminatorRe, timeoutMs = 15000) {
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
-      const cells = getSectionGridCells(doc, sectionCfg);
-      if (cells && cells.length) {
-        const rows = splitRowsByTerminator(cells, rowTerminatorRe || /^View (review|question)$/i);
-        if (rows.length) return true;
-      }
+      const rows = getSectionRowsIn(doc, { ...sectionCfg, rowTerminatorRe });
+      if (rows.length) return true;
       await new Promise((r) => setTimeout(r, 250));
     }
     return false;
@@ -466,12 +496,11 @@
   function sectionSignature(doc, { startHeadingText, endHeadingText, rowTerminatorRe }) {
     const start = findHeadingByTextIn(doc, startHeadingText);
     if (!start) return '';
-    const end = endHeadingText ? findHeadingByTextIn(doc, endHeadingText) : null;
-    const gridCells = Array.from(doc.querySelectorAll('[role="gridcell"]'));
-    const scopedCells = nodesBetween(start, end, gridCells);
-    const terminator = rowTerminatorRe || /^View (review|question)$/i;
-    const rows = splitRowsByTerminator(scopedCells, terminator);
+    const rows = getSectionRowsIn(doc, { startHeadingText, endHeadingText, rowTerminatorRe });
     if (!rows.length) {
+      const end = endHeadingText ? findHeadingByTextIn(doc, endHeadingText) : null;
+      const gridCells = Array.from(doc.querySelectorAll('[role="gridcell"]'));
+      const scopedCells = nodesBetween(start, end, gridCells);
       // Fallback: sample from both ends, not only the top (top can be static headers).
       const head = scopedCells.slice(0, 12);
       const tail = scopedCells.slice(-12);
@@ -542,14 +571,9 @@
   }
 
   function computeSectionSumIn(doc, { startHeadingText, endHeadingText, rowTerminatorRe }) {
-    const start = findHeadingByTextIn(doc, startHeadingText);
-    if (!start) return { sum: 0, found: false, rowsCounted: 0, rowsSeen: 0 };
-    const end = endHeadingText ? findHeadingByTextIn(doc, endHeadingText) : null;
     const targetDay = getTargetDayParts();
-
-    const gridCells = Array.from(doc.querySelectorAll('[role="gridcell"]'));
-    const scopedCells = nodesBetween(start, end, gridCells);
-    const rows = splitRowsByTerminator(scopedCells, rowTerminatorRe);
+    const rows = getSectionRowsIn(doc, { startHeadingText, endHeadingText, rowTerminatorRe });
+    if (!rows.length) return { sum: 0, found: false, rowsCounted: 0, rowsSeen: 0 };
 
     let sum = 0;
     let rowsCounted = 0;
