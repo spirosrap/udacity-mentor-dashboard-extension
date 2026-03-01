@@ -39,3 +39,4 @@ This extension combines both scripts into one package and adds a popup UI:
 - History parsing now reads semantic grid rows (`role=row`) with fallback logic, reducing missed entries when row action labels vary.
 - Discovery now avoids `certifications` false positives and can fall back to stronger API totals when History appears truncated.
 - API pagination now boosts page size (`per_page`) to reduce first-page-only undercount scenarios.
+- Daily total fallback now merges multiple discovered API seeds (including weak candidates) with cross-source dedupe for better completeness.
