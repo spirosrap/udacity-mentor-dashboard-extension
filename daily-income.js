@@ -189,6 +189,60 @@
     return Number.isFinite(n) ? n : null;
   }
 
+  function parseMoneyValues(text) {
+    if (!text) return [];
+    const out = [];
+    const re = /(?:US)?\$[\s]*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/gi;
+    let m;
+    while ((m = re.exec(String(text))) !== null) {
+      const n = Number(String(m[1] || '').replace(/,/g, ''));
+      if (Number.isFinite(n)) out.push(n);
+    }
+    return out;
+  }
+
+  function parseRowEarnedAmount(row) {
+    if (!Array.isArray(row) || !row.length) return null;
+    const cells = row
+      .map((txt) => ({
+        text: String(txt || ''),
+        amounts: parseMoneyValues(txt),
+      }))
+      .filter((c) => c.amounts.length > 0);
+    if (!cells.length) return null;
+
+    const all = cells.flatMap((c) => c.amounts);
+    const allPositive = all.filter((n) => Number.isFinite(n) && n > 0);
+    if (!allPositive.length) return null;
+
+    const max = Math.max(...allPositive);
+    const sumAll = allPositive.reduce((a, b) => a + b, 0);
+    const sumWithoutMax = sumAll - max;
+
+    // If the row contains both components and an explicit total, prefer the total.
+    if (allPositive.length >= 2 && Math.abs(max - sumWithoutMax) <= 0.02) {
+      return max;
+    }
+
+    const joined = row.join(' ').toLowerCase();
+    const hasBonusLike = /\bbonus\b|\bincentive\b|\bextra\b/.test(joined);
+
+    // If bonus/incentive is present, include all monetary components on the row.
+    if (hasBonusLike && allPositive.length >= 2 && allPositive.length <= 6) {
+      return allPositive.reduce((a, b) => a + b, 0);
+    }
+
+    const strongCells = cells.filter((c) => /\bearned\b|\btotal\b|\bpayout\b|\bpayment\b|\bcompensation\b/.test(c.text.toLowerCase()));
+    if (strongCells.length) {
+      const strongAmounts = strongCells.flatMap((c) => c.amounts).filter((n) => Number.isFinite(n) && n > 0);
+      if (strongAmounts.length === 1) return strongAmounts[0];
+      if (strongAmounts.length > 1) return Math.max(...strongAmounts);
+    }
+
+    // Fallback: choose the largest amount in the row (better than first amount).
+    return max;
+  }
+
   function parseMonthDayYear(text) {
     // Expected like: "January 23, 2026"
     if (!text) return null;
@@ -428,7 +482,7 @@
     }
 
     const summarizeRow = (row) => {
-      const earned = row.map(parseMoney).find((n) => n != null) ?? null;
+      const earned = parseRowEarnedAmount(row);
       const completed = row.map(parseMonthDayYear).find((d) => d != null) ?? null;
       const dateKey = completed ? `${completed.y}-${String(completed.m).padStart(2, '0')}-${String(completed.d).padStart(2, '0')}` : '';
       return `${dateKey}|${earned != null ? earned : ''}`;
@@ -501,7 +555,7 @@
     let rowsCounted = 0;
     let maxCompleted = null;
     for (const row of rows) {
-      const earned = row.map(parseMoney).find((n) => n != null) ?? null;
+      const earned = parseRowEarnedAmount(row);
       const completed = row.map(parseMonthDayYear).find((d) => d != null) ?? null;
       if (earned == null || !completed) continue;
       if (!maxCompleted || compareYMD(completed, maxCompleted) > 0) maxCompleted = completed;
@@ -861,6 +915,17 @@
     return fallback;
   }
 
+  function getItemUniqueHint(obj) {
+    const v = getStringish(obj, [
+      'id', 'uuid', 'uid', 'taskId', 'task_id', 'submissionId', 'submission_id',
+      'reviewId', 'review_id', 'questionId', 'question_id', 'assessmentId', 'assessment_id',
+      'nodeId', 'node_id'
+    ]);
+    if (v == null) return '';
+    const s = String(v).trim();
+    return s || '';
+  }
+
   function extractItemsFromAny(payload, fallbackType) {
     // Walk the payload and collect objects that look like history items.
     const items = [];
@@ -896,7 +961,10 @@
       const date = tryParseDate(dateRaw);
       if (earned != null && date) {
         const type = classifyItemType(cur, fallbackType);
-        const sig = `${type || ''}|${date.getTime()}|${earned}`;
+        const hint = getItemUniqueHint(cur);
+        const sig = hint
+          ? `${type || ''}|${hint}|${date.getTime()}|${earned}`
+          : `${type || ''}|${date.getTime()}|${earned}`;
         if (!sigs.has(sig)) {
           sigs.add(sig);
           items.push({
@@ -911,7 +979,10 @@
         const deep = guessed || guessAmountAndDateDeep(cur);
         if (deep) {
           const type = classifyItemType(cur, fallbackType);
-          const sig = `${type || ''}|${deep.date.getTime()}|${deep.earned}`;
+          const hint = getItemUniqueHint(cur);
+          const sig = hint
+            ? `${type || ''}|${hint}|${deep.date.getTime()}|${deep.earned}`
+            : `${type || ''}|${deep.date.getTime()}|${deep.earned}`;
           if (!sigs.has(sig)) {
             sigs.add(sig);
             items.push({

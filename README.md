@@ -35,3 +35,4 @@ This extension combines both scripts into one package and adds a popup UI:
 - Visibility preferences are saved in extension storage and applied on reload.
 - Low-load defaults: Daily Income starts disabled; Auto Refresh starts enabled.
 - Auto Refresh countdown resets when you manually reload the page.
+- Daily Income parsing now handles rows with multiple dollar amounts (for example payout + bonus) more accurately.
