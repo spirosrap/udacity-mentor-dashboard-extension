@@ -981,7 +981,13 @@
     if (!key) return n;
     const explicitMinor = /cent|minor/.test(key);
     const knownMinorPriceKey = /(^|_)(base_price|exchange_currency_price|local_bonus_amount|bonus_amount|amount_cents|payout_cents|earned_cents)(_|$)/.test(key);
-    if ((explicitMinor || knownMinorPriceKey) && Number.isInteger(n) && Math.abs(n) >= 1) return n / 100;
+    if (Number.isInteger(n)) {
+      // Explicit minor-unit keys (e.g. amount_cents) are always cents.
+      if (explicitMinor && Math.abs(n) >= 1) return n / 100;
+      // Price-like keys can be either dollars or cents across endpoints:
+      // only treat as cents when magnitude strongly indicates minor units.
+      if (knownMinorPriceKey && Math.abs(n) >= 100) return n / 100;
+    }
     return n;
   }
 
