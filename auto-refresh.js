@@ -298,6 +298,7 @@
     const watchForResume = options.watchForResume !== false;
     const force = options.force === true;
     if (stopped && !force) return;
+    if (stopped && force && reason === lastStopReason) return;
     const wasStopped = stopped;
     stopped = true;
 
@@ -326,7 +327,9 @@
 
   function enforceUserSetting(reason) {
     if (!isUserEnabled()) {
-      stop(STOP_REASON_USER_DISABLED, { watchForResume: false, force: true });
+      if (!(stopped && lastStopReason === STOP_REASON_USER_DISABLED)) {
+        stop(STOP_REASON_USER_DISABLED, { watchForResume: false, force: true });
+      }
       return true;
     }
 

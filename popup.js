@@ -17,7 +17,6 @@ const elToggleRefresh = document.getElementById("toggle-refresh");
 const elRefreshButton = document.getElementById("refresh-btn");
 
 let activeTabId = null;
-let pollId = null;
 
 function setStatus(text) {
   elStatus.textContent = text;
@@ -164,10 +163,3 @@ elRefreshButton.addEventListener("click", () => {
 });
 
 loadState();
-pollId = window.setInterval(() => {
-  loadState();
-}, 1500);
-
-window.addEventListener("unload", () => {
-  if (pollId !== null) window.clearInterval(pollId);
-});

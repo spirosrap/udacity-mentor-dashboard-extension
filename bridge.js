@@ -143,7 +143,6 @@
   async function handleGetState(sendResponse) {
     const prefs = await getPrefs();
     applyPrefs(prefs);
-    syncAutoRefreshEnabled(prefs);
     sendResponse({
       ok: true,
       prefs,
