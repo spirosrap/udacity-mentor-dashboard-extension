@@ -689,7 +689,16 @@
     if (!url) return -Infinity;
     const lower = String(url).toLowerCase();
     const isCertifications = lower.includes('/certifications') || lower.includes('certifications.json');
+    const hasReviewHint = /(^|[\/_.-])review(s)?([\/_.-]|$)/.test(lower);
+    const hasQuestionHint = /(^|[\/_.-])(question|questions|comment|comments|answer|answers)([\/_.-]|$)/.test(lower);
     if (isCertifications && !includeWeak) return -Infinity;
+    if (type === 'review') {
+      if (!includeWeak && !hasReviewHint) return -Infinity;
+      if (hasQuestionHint && !hasReviewHint) return -Infinity;
+    } else if (type === 'question') {
+      if (!includeWeak && !hasQuestionHint) return -Infinity;
+      if (hasReviewHint && !hasQuestionHint) return -Infinity;
+    }
     let score = 0;
     if (isCertifications) score -= 80;
     if (lower.includes('/api/')) score += 20;
@@ -726,7 +735,7 @@
     }
   }
 
-  function pickDiscoveredApiUrls(discovery, type, { max = 3, includeWeak = true } = {}) {
+  function pickDiscoveredApiUrls(discovery, type, { max = 3, includeWeak = false } = {}) {
     const choices = [];
     const direct = discovery?.endpoints?.[type === 'review' ? 'reviews' : 'questions'];
     if (direct) choices.push({ url: String(direct), candidate: null });
@@ -888,13 +897,46 @@
     try { safeSetLocalStorage(BEST_LOCK_KEY, JSON.stringify(obj || {})); } catch (_) {}
   }
 
+  function isLikelyCorruptDayPayload(payload) {
+    if (!payload || typeof payload !== 'object') return false;
+    const reviews = Number(payload.reviews || 0);
+    const questions = Number(payload.questions || 0);
+    const countedReviews = Math.max(0, Math.floor(Number(payload.countedReviews || 0)));
+    const countedQuestions = Math.max(0, Math.floor(Number(payload.countedQuestions || 0)));
+    if (!Number.isFinite(reviews) || !Number.isFinite(questions)) return true;
+    if (reviews < -0.01 || questions < -0.01) return true;
+    const total = reviews + questions;
+    const totalCount = countedReviews + countedQuestions;
+    if (total > 0 && totalCount === 0) return true;
+    if (total > 20000) return true;
+    const reviewAvg = countedReviews > 0 ? reviews / countedReviews : 0;
+    const questionAvg = countedQuestions > 0 ? questions / countedQuestions : 0;
+    if (reviewAvg > 150 || questionAvg > 150) return true;
+    return false;
+  }
+
+  function clearBestLock(dayKey) {
+    if (!dayKey) return;
+    const all = loadBestByDay();
+    if (!all || typeof all !== 'object' || !(dayKey in all)) return;
+    const next = { ...all };
+    delete next[dayKey];
+    saveBestByDay(next);
+  }
+
   function loadBestLock(dayKey) {
     const all = loadBestByDay();
-    return (all && typeof all === 'object') ? (all[dayKey] || null) : null;
+    const val = (all && typeof all === 'object') ? (all[dayKey] || null) : null;
+    if (val && isLikelyCorruptDayPayload(val)) {
+      clearBestLock(dayKey);
+      return null;
+    }
+    return val;
   }
 
   function saveBestLock(dayKey, payload) {
     if (!dayKey || !payload) return;
+    if (isLikelyCorruptDayPayload(payload)) return;
     const all = loadBestByDay();
     const prev = (all && typeof all === 'object') ? (all[dayKey] || null) : null;
     if (!shouldOverwriteDayCache(prev, payload)) return;
@@ -933,13 +975,27 @@
     return undefined;
   }
 
+  function normalizeMoneyByHint(n, hintKey) {
+    if (!Number.isFinite(n)) return null;
+    const key = String(hintKey || '').toLowerCase();
+    if (!key) return n;
+    const explicitMinor = /cent|minor/.test(key);
+    const knownMinorPriceKey = /(^|_)(base_price|exchange_currency_price|local_bonus_amount|bonus_amount|amount_cents|payout_cents|earned_cents)(_|$)/.test(key);
+    if ((explicitMinor || knownMinorPriceKey) && Number.isInteger(n) && Math.abs(n) >= 1) return n / 100;
+    return n;
+  }
+
   function toMoneyNumber(v, hintKey) {
     if (typeof v === 'number' && Number.isFinite(v)) {
-      // If the field name hints at cents, convert.
-      if (hintKey && typeof hintKey === 'string' && /cent/i.test(hintKey) && Math.abs(v) >= 1) return v / 100;
-      return v;
+      return normalizeMoneyByHint(v, hintKey);
     }
-    if (typeof v === 'string') return parseMoney(v) ?? (Number.isFinite(Number(v)) ? Number(v) : null);
+    if (typeof v === 'string') {
+      const direct = parseMoney(v);
+      if (direct != null) return direct;
+      const num = Number(v);
+      if (!Number.isFinite(num)) return null;
+      return normalizeMoneyByHint(num, hintKey);
+    }
     if (Array.isArray(v)) {
       for (const el of v) {
         const n = toMoneyNumber(el, hintKey);
@@ -1020,7 +1076,9 @@
       }
     }
 
-    if (bestAmount != null && bestDate) return { earned: bestAmount, date: bestDate };
+    if (bestAmount != null && bestDate && bestAmountScore >= 10 && bestDateScore >= 8) {
+      return { earned: bestAmount, date: bestDate };
+    }
     return null;
   }
 
@@ -1066,7 +1124,9 @@
       }
     }
 
-    if (bestAmount != null && bestDate) return { earned: bestAmount, date: bestDate };
+    if (bestAmount != null && bestDate && bestAmountScore >= 10 && bestDateScore >= 8) {
+      return { earned: bestAmount, date: bestDate };
+    }
     return null;
   }
 
@@ -1086,6 +1146,31 @@
     if (v == null) return '';
     const s = String(v).trim();
     return s || '';
+  }
+
+  function extractEarnedFromKnownPriceFields(obj) {
+    if (!obj || typeof obj !== 'object') return null;
+    const base = toMoneyNumber(getStringish(obj, ['basePrice', 'base_price']), 'base_price');
+    const bonus = toMoneyNumber(getStringish(obj, ['localBonusAmount', 'local_bonus_amount', 'bonusAmount', 'bonus_amount']), 'local_bonus_amount');
+    const exchange = toMoneyNumber(getStringish(obj, ['exchangeCurrencyPrice', 'exchange_currency_price']), 'exchange_currency_price');
+    const payout = toMoneyNumber(getStringish(obj, [
+      'earned', 'earning', 'earnings', 'earnedAmount', 'earned_amount',
+      'amount', 'amountUsd', 'amount_usd', 'payout', 'payoutAmount', 'payout_amount',
+      'payment', 'paymentAmount', 'payment_amount', 'compensation', 'fee',
+      'usd', 'totalAmount', 'total_amount', 'totalPayout', 'total_payout',
+      'amountCents', 'amount_cents', 'payoutCents', 'payout_cents', 'earnedCents', 'earned_cents',
+    ]), 'amount');
+
+    if (exchange != null && base != null && bonus != null) {
+      if (Math.abs(exchange - (base + bonus)) <= 0.05) return exchange;
+      return Math.max(exchange, base + bonus);
+    }
+    if (base != null && bonus != null) return base + bonus;
+    if (exchange != null) return exchange;
+    if (payout != null) return payout;
+    if (base != null) return base;
+    if (bonus != null) return bonus;
+    return null;
   }
 
   function extractItemsFromAny(payload, fallbackType) {
@@ -1111,15 +1196,17 @@
         'earned', 'earning', 'earnings', 'earnedAmount', 'earned_amount',
         'amount', 'amountUsd', 'amount_usd', 'payout', 'payoutAmount', 'payout_amount',
         'payment', 'paymentAmount', 'payment_amount', 'compensation', 'fee',
-        'usd', 'value', 'total', 'totalAmount', 'total_amount', 'price', 'rate',
+        'usd', 'totalAmount', 'total_amount', 'totalPayout', 'total_payout',
         'amountCents', 'amount_cents', 'payoutCents', 'payout_cents', 'earnedCents', 'earned_cents',
+        'basePrice', 'base_price', 'exchangeCurrencyPrice', 'exchange_currency_price',
+        'localBonusAmount', 'local_bonus_amount', 'bonusAmount', 'bonus_amount',
       ]);
       const dateRaw = getStringish(cur, [
         'completed', 'completedAt', 'completed_at', 'completedOn', 'completed_on', 'completedDate', 'completed_date',
         'submittedAt', 'submitted_at', 'createdAt', 'created_at', 'finishedAt', 'finished_at',
         'date', 'timestamp', 'time', 'at',
       ]);
-      const earned = toMoneyNumber(earnedRaw);
+      const earned = extractEarnedFromKnownPriceFields(cur) ?? toMoneyNumber(earnedRaw);
       const date = tryParseDate(dateRaw);
       if (earned != null && date) {
         const type = classifyItemType(cur, fallbackType);
@@ -2339,9 +2426,10 @@
 
   function loadDayCache(cache, dayKey) {
     if (!cache || typeof cache !== 'object') return null;
-    const byDayVal = (cache.byDay && typeof cache.byDay === 'object' && cache.byDay[dayKey]) ? cache.byDay[dayKey] : null;
-    const bestVal = (cache.bestByDay && typeof cache.bestByDay === 'object' && cache.bestByDay[dayKey]) ? cache.bestByDay[dayKey] : null;
-    const lockVal = loadBestLock(dayKey);
+    const sanitize = (v) => (isLikelyCorruptDayPayload(v) ? null : v);
+    const byDayVal = sanitize((cache.byDay && typeof cache.byDay === 'object' && cache.byDay[dayKey]) ? cache.byDay[dayKey] : null);
+    const bestVal = sanitize((cache.bestByDay && typeof cache.bestByDay === 'object' && cache.bestByDay[dayKey]) ? cache.bestByDay[dayKey] : null);
+    const lockVal = sanitize(loadBestLock(dayKey));
     if (byDayVal || bestVal || lockVal) {
       let winner = byDayVal || null;
       if (!winner || shouldOverwriteDayCache(winner, bestVal)) winner = bestVal || winner;
@@ -2361,6 +2449,7 @@
   }
 
   function saveDayCache(dayKey, payload) {
+    if (!dayKey || !payload || isLikelyCorruptDayPayload(payload)) return;
     const existing = loadCache() || {};
     const byDay = (existing.byDay && typeof existing.byDay === 'object') ? existing.byDay : {};
     const bestByDay = (existing.bestByDay && typeof existing.bestByDay === 'object') ? existing.bestByDay : {};
@@ -2386,7 +2475,9 @@
   function shouldOverwriteDayCache(existingDay, nextDay) {
     // Prevent overwriting a "fuller" day total with a partial one.
     if (!nextDay) return false;
+    if (isLikelyCorruptDayPayload(nextDay)) return false;
     if (!existingDay) return true;
+    if (isLikelyCorruptDayPayload(existingDay)) return true;
     const exCount = (existingDay.countedReviews || 0) + (existingDay.countedQuestions || 0);
     const nxCount = (nextDay.countedReviews || 0) + (nextDay.countedQuestions || 0);
     const exSum = (existingDay.reviews || 0) + (existingDay.questions || 0);
@@ -2461,8 +2552,8 @@
 	            ((qp <= 1) && questions.rowsSeen >= 15 && questions.rowsCounted === questions.rowsSeen);
 
 	          if (historyLikelyTruncated && (force || Date.now() - lastApiFetchAt >= 3_000)) {
-	            const reviewUrls = pickDiscoveredApiUrls(discovery, 'review', { max: 4, includeWeak: true });
-	            const questionUrls = pickDiscoveredApiUrls(discovery, 'question', { max: 2, includeWeak: true });
+	            const reviewUrls = pickDiscoveredApiUrls(discovery, 'review', { max: 4, includeWeak: false });
+	            const questionUrls = pickDiscoveredApiUrls(discovery, 'question', { max: 2, includeWeak: false });
 	            const urls = [
 	              ...reviewUrls.map((url) => ({ type: 'review', url })),
 	              ...questionUrls.map((url) => ({ type: 'question', url })),
@@ -2542,8 +2633,8 @@
             note: 'Loading totals from API…',
           });
 
-	          const reviewUrls = pickDiscoveredApiUrls(discovery, 'review', { max: 4, includeWeak: true });
-	          const questionUrls = pickDiscoveredApiUrls(discovery, 'question', { max: 2, includeWeak: true });
+	          const reviewUrls = pickDiscoveredApiUrls(discovery, 'review', { max: 4, includeWeak: false });
+	          const questionUrls = pickDiscoveredApiUrls(discovery, 'question', { max: 2, includeWeak: false });
 	          const urls = [
 	            ...reviewUrls.map((url) => ({ type: 'review', url })),
 	            ...questionUrls.map((url) => ({ type: 'question', url })),
