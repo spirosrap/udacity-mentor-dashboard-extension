@@ -34,9 +34,11 @@ function normalizeMultiline(text) {
 function summarizeIncomeMeta(meta) {
   const text = (meta || "").trim();
   if (!text) return "-";
-  const idx = text.indexOf(" Endpoints:");
-  if (idx === -1) return text;
-  return text.slice(0, idx).trim();
+  const sourceMatch = text.match(/Source:\s*([^.\n]+)/i);
+  if (sourceMatch && sourceMatch[1]) {
+    return `Source: ${sourceMatch[1].trim()}`;
+  }
+  return "Details hidden. Expand \"Show debug info\".";
 }
 
 function setIncomeUnavailable() {
