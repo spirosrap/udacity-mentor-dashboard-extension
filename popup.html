@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Udacity Mentor Tools</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <h1>Udacity Mentor Tools</h1>
+
+      <p id="status" class="status">Loading...</p>
+
+      <section class="card">
+        <h2>Daily Income</h2>
+        <div class="row"><span>R</span><strong id="income-reviews">-</strong></div>
+        <div class="row"><span>Q</span><strong id="income-questions">-</strong></div>
+        <div class="row"><span>T</span><strong id="income-total">-</strong></div>
+        <div class="row"><span>Status</span><strong id="income-status">-</strong></div>
+        <div class="row"><span>Date</span><strong id="income-date">-</strong></div>
+        <p id="income-details" class="details">-</p>
+      </section>
+
+      <section class="card">
+        <h2>Auto Refresh</h2>
+        <p id="auto-refresh-text" class="details">-</p>
+      </section>
+
+      <section class="card">
+        <h2>Visibility</h2>
+        <label class="toggle">
+          <input id="toggle-income" type="checkbox" />
+          <span>Hide Daily Income box on page</span>
+        </label>
+        <label class="toggle">
+          <input id="toggle-refresh" type="checkbox" />
+          <span>Hide Auto Refresh box on page</span>
+        </label>
+      </section>
+
+      <button id="refresh-btn" type="button">Refresh</button>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
