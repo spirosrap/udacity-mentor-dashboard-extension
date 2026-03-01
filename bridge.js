@@ -3,15 +3,19 @@
 
   const PREFS_KEY = "udacityMentorDashboardUiPrefsV1";
   const STYLE_ID = "udacity-mentor-dashboard-extension-visibility-style";
+  const AUTO_REFRESH_ENABLED_KEY = "udacityMentorAutoRefreshEnabled";
+  const AUTO_REFRESH_EVENT = "udacity-tools:auto-refresh-enabled";
   const DEFAULT_PREFS = Object.freeze({
     hideIncomeBox: false,
     hideAutoRefreshBox: false,
+    autoRefreshEnabled: true,
   });
 
   function normalizePrefs(raw) {
     return {
       hideIncomeBox: !!raw?.hideIncomeBox,
       hideAutoRefreshBox: !!raw?.hideAutoRefreshBox,
+      autoRefreshEnabled: raw?.autoRefreshEnabled !== false,
     };
   }
 
@@ -69,6 +73,24 @@
     style.textContent = rules.join("\n");
   }
 
+  function syncAutoRefreshEnabled(prefs) {
+    const enabled = prefs?.autoRefreshEnabled !== false;
+    try {
+      window.localStorage.setItem(AUTO_REFRESH_ENABLED_KEY, enabled ? "1" : "0");
+    } catch (_) {
+      // ignore
+    }
+    try {
+      window.dispatchEvent(
+        new CustomEvent(AUTO_REFRESH_EVENT, {
+          detail: { enabled },
+        }),
+      );
+    } catch (_) {
+      // ignore
+    }
+  }
+
   function text(root, selector) {
     const node = root ? root.querySelector(selector) : null;
     return (node?.textContent || "").trim();
@@ -121,6 +143,7 @@
   async function handleGetState(sendResponse) {
     const prefs = await getPrefs();
     applyPrefs(prefs);
+    syncAutoRefreshEnabled(prefs);
     sendResponse({
       ok: true,
       prefs,
@@ -138,6 +161,7 @@
     };
     const saved = await setPrefs(next);
     applyPrefs(saved.prefs);
+    syncAutoRefreshEnabled(saved.prefs);
     sendResponse({
       ok: saved.ok,
       prefs: saved.prefs,
@@ -158,6 +182,13 @@
   });
 
   getPrefs()
-    .then((prefs) => applyPrefs(prefs))
-    .catch(() => applyPrefs({ ...DEFAULT_PREFS }));
+    .then((prefs) => {
+      applyPrefs(prefs);
+      syncAutoRefreshEnabled(prefs);
+    })
+    .catch(() => {
+      const fallback = { ...DEFAULT_PREFS };
+      applyPrefs(fallback);
+      syncAutoRefreshEnabled(fallback);
+    });
 })();

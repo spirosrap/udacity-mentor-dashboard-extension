@@ -11,6 +11,7 @@ const elIncomeStatus = document.getElementById("income-status");
 const elIncomeDate = document.getElementById("income-date");
 const elIncomeDetails = document.getElementById("income-details");
 const elAutoRefreshText = document.getElementById("auto-refresh-text");
+const elToggleAutoRefreshEnabled = document.getElementById("toggle-auto-refresh-enabled");
 const elToggleIncome = document.getElementById("toggle-income");
 const elToggleRefresh = document.getElementById("toggle-refresh");
 const elRefreshButton = document.getElementById("refresh-btn");
@@ -46,6 +47,7 @@ function renderFromState(state) {
   const autoRefresh = state?.autoRefresh || {};
   const prefs = state?.prefs || {};
 
+  elToggleAutoRefreshEnabled.checked = prefs.autoRefreshEnabled !== false;
   elToggleIncome.checked = !!prefs.hideIncomeBox;
   elToggleRefresh.checked = !!prefs.hideAutoRefreshBox;
 
@@ -134,6 +136,7 @@ async function savePrefs() {
     await sendMessageToTab(activeTabId, {
       type: SET_PREFS,
       prefs: {
+        autoRefreshEnabled: elToggleAutoRefreshEnabled.checked,
         hideIncomeBox: elToggleIncome.checked,
         hideAutoRefreshBox: elToggleRefresh.checked,
       },
@@ -143,6 +146,10 @@ async function savePrefs() {
     setStatus("Failed to update visibility on this tab.");
   }
 }
+
+elToggleAutoRefreshEnabled.addEventListener("change", () => {
+  savePrefs();
+});
 
 elToggleIncome.addEventListener("change", () => {
   savePrefs();

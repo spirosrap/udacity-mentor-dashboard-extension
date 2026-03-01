@@ -18,9 +18,13 @@
   const SHOW_BADGE = true; // set to false if you don't want any on-page indicator
   const STOP_REASON_REVIEWS_REFRESH_MISSING =
     "Stopping: Reviews refresh button is no longer available (likely assigned a review / out of queue).";
+  const STOP_REASON_USER_DISABLED =
+    "Paused: Auto Refresh disabled in extension popup.";
   const STOP_MISSING_THRESHOLD = 3; // consecutive checks before stopping (avoids transient DOM states)
   const RESUME_CHECK_EVERY_MS = 2000; // while stopped, check whether Reviews refresh is back
   const STORAGE_KEY = "udacityMentorAutoRefresh";
+  const USER_ENABLED_KEY = "udacityMentorAutoRefreshEnabled";
+  const USER_ENABLED_EVENT = "udacity-tools:auto-refresh-enabled";
   const STORAGE_VERSION = 1;
 
   let timeoutId = null;
@@ -32,6 +36,7 @@
   let badgeEl = null;
   let reviewsRefreshSeenOnce = false;
   let missingReviewsStreak = 0;
+  let lastStopReason = "";
 
   // Quick fingerprint for debugging in DevTools:
   // type: window.__UDACITY_AUTO_REFRESH__
@@ -40,6 +45,7 @@
     loadedAt: new Date().toISOString(),
     getState: () => ({
       stopped,
+      userEnabled: isUserEnabled(),
       lastRunAtMs,
       nextRunAtMs,
       refreshEveryMs: REFRESH_EVERY_MS,
@@ -61,6 +67,17 @@
 
   function nowStamp() {
     return new Date().toISOString();
+  }
+
+  function isUserEnabled() {
+    try {
+      const raw = window.localStorage.getItem(USER_ENABLED_KEY);
+      if (raw == null) return true;
+      const normalized = String(raw).trim().toLowerCase();
+      return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+    } catch {
+      return true;
+    }
   }
 
   function loadPersistedState() {
@@ -143,7 +160,7 @@
   function renderBadge(extra = "") {
     const el = ensureBadge();
     if (!el) return;
-    const state = stopped ? "STOPPED" : "RUNNING";
+    const state = !isUserEnabled() ? "DISABLED" : stopped ? "STOPPED" : "RUNNING";
     const nextIn =
       !stopped && typeof nextRunAtMs === "number"
         ? formatCountdown(nextRunAtMs - Date.now())
@@ -173,6 +190,7 @@
 
   function maybeResume(reason) {
     if (!stopped) return false;
+    if (!isUserEnabled()) return false;
     if (!isOnTargetRoute()) return false;
 
     const reviewsBtn = getEnabledReviewsRefreshButton();
@@ -188,11 +206,27 @@
     persistState();
     scheduleNextTick();
 
+    clearResumeWatcher();
+    return true;
+  }
+
+  function clearResumeWatcher() {
     if (resumeIntervalId !== null) {
       clearInterval(resumeIntervalId);
       resumeIntervalId = null;
     }
-    return true;
+  }
+
+  function startResumeWatcher() {
+    if (resumeIntervalId !== null) return;
+    if (!isUserEnabled()) return;
+    resumeIntervalId = window.setInterval(() => {
+      if (!isUserEnabled()) {
+        enforceUserSetting("disabled in popup");
+        return;
+      }
+      maybeResume("queue re-entered");
+    }, RESUME_CHECK_EVERY_MS);
   }
 
   function findRefreshButtonForQueue(queueLabel) {
@@ -260,8 +294,11 @@
     console.log(`[auto-refresh][${nowStamp()}] Clicked Refresh for: ${clicked.join(", ")}.`);
   }
 
-  function stop(reason) {
-    if (stopped) return;
+  function stop(reason, options = {}) {
+    const watchForResume = options.watchForResume !== false;
+    const force = options.force === true;
+    if (stopped && !force) return;
+    const wasStopped = stopped;
     stopped = true;
 
     if (timeoutId !== null) {
@@ -269,7 +306,10 @@
       timeoutId = null;
     }
 
-    console.log(`[auto-refresh][${nowStamp()}] ${reason}`);
+    if (!wasStopped || reason !== lastStopReason) {
+      console.log(`[auto-refresh][${nowStamp()}] ${reason}`);
+      lastStopReason = reason;
+    }
     renderBadge(reason);
     persistState();
     try {
@@ -280,14 +320,29 @@
     }
 
     // Keep watching for when you re-enter the queue (Reviews refresh comes back).
-    if (resumeIntervalId === null) {
-      resumeIntervalId = window.setInterval(() => {
-        maybeResume("queue re-entered");
-      }, RESUME_CHECK_EVERY_MS);
+    if (watchForResume) startResumeWatcher();
+    else clearResumeWatcher();
+  }
+
+  function enforceUserSetting(reason) {
+    if (!isUserEnabled()) {
+      stop(STOP_REASON_USER_DISABLED, { watchForResume: false, force: true });
+      return true;
     }
+
+    if (stopped) {
+      const resumed = maybeResume(reason || "enabled in popup");
+      if (!resumed) {
+        renderBadge("Enabled (waiting for queue)");
+        persistState();
+        startResumeWatcher();
+      }
+    }
+    return false;
   }
 
   function tick() {
+    if (enforceUserSetting("enabled in popup")) return;
     if (shouldStop()) {
       stop(`${STOP_REASON_REVIEWS_REFRESH_MISSING} (streak=${missingReviewsStreak})`);
       return;
@@ -300,6 +355,7 @@
   }
 
   function scheduleNextTick() {
+    if (enforceUserSetting("enabled in popup")) return;
     if (stopped) return;
     if (!isOnTargetRoute()) return;
     if (typeof nextRunAtMs !== "number") nextRunAtMs = Date.now() + START_DELAY_MS;
@@ -334,15 +390,13 @@
     if (nextRunAtMs <= Date.now()) nextRunAtMs = Date.now() + 750; // run soon if overdue
     renderBadge(stopped ? "Paused (waiting for queue)" : "Scheduled");
     persistState();
+    enforceUserSetting("enabled in popup");
     if (!stopped) scheduleNextTick();
-    else if (resumeIntervalId === null) {
-      resumeIntervalId = window.setInterval(() => {
-        maybeResume("queue re-entered");
-      }, RESUME_CHECK_EVERY_MS);
-    }
+    else startResumeWatcher();
 
     // Stop quickly if the page updates and removes/locks the reviews refresh button.
     observer = new MutationObserver(() => {
+      if (enforceUserSetting("enabled in popup")) return;
       if (stopped) {
         maybeResume("DOM update");
         return;
@@ -355,9 +409,13 @@
     window.addEventListener("beforeunload", () => {
       persistState();
     });
+    window.addEventListener("storage", (event) => {
+      if (event.key === USER_ENABLED_KEY) enforceUserSetting("synced setting");
+    });
+    window.addEventListener(USER_ENABLED_EVENT, () => {
+      enforceUserSetting("popup toggle");
+    });
   }
 
   start();
 })();
-
-
