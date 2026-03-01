@@ -38,3 +38,4 @@ This extension combines both scripts into one package and adds a popup UI:
 - Daily Income parsing now handles rows with multiple dollar amounts (for example payout + bonus) more accurately.
 - History parsing now reads semantic grid rows (`role=row`) with fallback logic, reducing missed entries when row action labels vary.
 - Discovery now avoids `certifications` false positives and can fall back to stronger API totals when History appears truncated.
+- API pagination now boosts page size (`per_page`) to reduce first-page-only undercount scenarios.

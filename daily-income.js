@@ -708,6 +708,12 @@
     const choices = [];
     const direct = discovery?.endpoints?.[type === 'review' ? 'reviews' : 'questions'];
     if (direct) choices.push({ url: String(direct), candidate: null });
+    const lastParsed = discovery?.lastParsed?.url;
+    if (lastParsed) choices.push({ url: String(lastParsed), candidate: discovery?.lastParsed || null });
+    const lastFetch = discovery?.lastFetchUrl;
+    if (lastFetch) choices.push({ url: String(lastFetch), candidate: null });
+    const lastXhr = discovery?.lastXhrUrl;
+    if (lastXhr) choices.push({ url: String(lastXhr), candidate: null });
     const candidates = Array.isArray(discovery?.candidates) ? discovery.candidates : [];
     for (const c of candidates) {
       if (!c || !c.url) continue;
@@ -723,6 +729,34 @@
       }
     }
     return bestScore > -Infinity ? best : null;
+  }
+
+  function withLargePageSize(url) {
+    if (!url || typeof url !== 'string') return url;
+    try {
+      const u = new URL(url, window.location.origin);
+      const keys = ['per_page', 'perPage', 'page_size', 'pageSize', 'limit'];
+      let touched = false;
+      let hasPagingKey = false;
+      for (const key of keys) {
+        if (!u.searchParams.has(key)) continue;
+        hasPagingKey = true;
+        const cur = Number(u.searchParams.get(key));
+        if (!Number.isFinite(cur) || cur < 200) {
+          u.searchParams.set(key, '200');
+          touched = true;
+        }
+      }
+      const pathLower = u.pathname.toLowerCase();
+      const looksCompletedList = pathLower.includes('submissions') || pathLower.includes('completed') || pathLower.includes('history');
+      if (!hasPagingKey && looksCompletedList) {
+        u.searchParams.set('per_page', '200');
+        touched = true;
+      }
+      return u.toString();
+    } catch (_) {
+      return url;
+    }
   }
 
   function loadCache() {
@@ -2160,7 +2194,7 @@
     const SLEEP_MS = 150;
     const target = targetDayParts || getTargetDayParts();
 
-    let curUrl = url;
+    let curUrl = withLargePageSize(url);
     let page = 0;
     const seenUrls = new Set();
     const matched = [];
@@ -2229,7 +2263,7 @@
         break;
       }
 
-      curUrl = nextUrl;
+      curUrl = withLargePageSize(nextUrl);
       page += 1;
       await new Promise((r) => setTimeout(r, SLEEP_MS));
     }
@@ -2360,13 +2394,20 @@
 	            ((rp <= 1) && reviews.rowsSeen >= 15 && reviews.rowsCounted === reviews.rowsSeen) ||
 	            ((qp <= 1) && questions.rowsSeen >= 15 && questions.rowsCounted === questions.rowsSeen);
 
-	          if (historyLikelyTruncated && (force || Date.now() - lastApiFetchAt >= 12_000)) {
+	          if (historyLikelyTruncated && (force || Date.now() - lastApiFetchAt >= 3_000)) {
 	            const reviewUrl = pickDiscoveredApiUrl(discovery, 'review');
 	            const questionUrl = pickDiscoveredApiUrl(discovery, 'question');
 	            const urls = [
 	              reviewUrl ? { type: 'review', url: reviewUrl } : null,
 	              questionUrl ? { type: 'question', url: questionUrl } : null,
 	            ].filter(Boolean);
+	            if (urls.length) {
+	              const d2 = loadDiscovery() || discovery || {};
+	              d2.endpoints = d2.endpoints || {};
+	              if (reviewUrl && isUsableApiEndpointUrl(reviewUrl)) d2.endpoints.reviews = reviewUrl;
+	              if (questionUrl && isUsableApiEndpointUrl(questionUrl)) d2.endpoints.questions = questionUrl;
+	              saveDiscovery(d2);
+	            }
 	            if (urls.length) {
 	              try {
 	                lastApiFetchAt = Date.now();
