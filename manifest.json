@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Udacity Mentor Dashboard Tools",
+  "version": "1.0.0",
+  "description": "Combines Daily Income Counter and Queue Auto Refresh for Udacity Mentor Dashboard.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://mentor-dashboard.udacity.com/queue/*"
+      ],
+      "js": [
+        "daily-income.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://mentor-dashboard.udacity.com/*"
+      ],
+      "js": [
+        "auto-refresh.js"
+      ],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    }
+  ]
+}
