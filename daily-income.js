@@ -2547,9 +2547,16 @@
 	          let apiQuestionPages = 0;
 	          let apiIncomplete = false;
 
+	          const looksLikeSingleFullPage = (section, pages) => {
+	            if ((pages || 1) > 1) return false;
+	            const seen = Number(section?.rowsSeen || 0);
+	            const counted = Number(section?.rowsCounted || 0);
+	            if (!Number.isFinite(seen) || seen < 10) return false;
+	            return counted === seen;
+	          };
 	          const historyLikelyTruncated =
-	            ((rp <= 1) && reviews.rowsSeen >= 15 && reviews.rowsCounted === reviews.rowsSeen) ||
-	            ((qp <= 1) && questions.rowsSeen >= 15 && questions.rowsCounted === questions.rowsSeen);
+	            looksLikeSingleFullPage(reviews, rp) ||
+	            looksLikeSingleFullPage(questions, qp);
 
 	          if (historyLikelyTruncated && (force || Date.now() - lastApiFetchAt >= 3_000)) {
 	            const reviewUrls = pickDiscoveredApiUrls(discovery, 'review', { max: 4, includeWeak: false });
