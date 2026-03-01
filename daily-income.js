@@ -19,6 +19,8 @@
   const IFRAME_ID = 'tm-udacity-history-iframe';
   const DETAILS_KEY = 'tmUdacityDailyIncomeDetailsOpen';
   const TARGET_DAY_KEY = 'tmUdacityDailyIncomeTargetDay'; // "YYYY-MM-DD" in TODAY_TIME_ZONE terms
+  const DAILY_INCOME_ENABLED_KEY = 'udacityMentorDailyIncomeEnabled';
+  const DAILY_INCOME_EVENT = 'udacity-tools:daily-income-enabled';
   let lastBackgroundError = '';
   let lastStatus = 'loading'; // loading | ready | error
   const DISCOVERY_KEY = 'tmUdacityDailyIncomeApiDiscovery';
@@ -28,6 +30,7 @@
   const BEST_LOCK_KEY = 'tmUdacityDailyIncomeBestByDay';
   let recomputeInFlight = false;
   let recomputeQueued = false;
+  let lastRecomputeFinishedAt = 0;
   let lastRenderSignature = '';
   let lastApiFetchAt = 0;
   let discoveryInstalled = false;
@@ -37,6 +40,13 @@
   const DEFAULT_BOTTOM_PX = 14;
   const ANCHOR_GAP_PX = 14;
   const SAFE_FALLBACK_CLEARANCE_PX = 70;
+  const MIN_RECOMPUTE_INTERVAL_MS = 8000;
+  const ANCHOR_SCAN_TTL_MS = 8000;
+  const POSITION_RECALC_TTL_MS = 1500;
+  const MUTATION_RECOMPUTE_MIN_DELAY_MS = 2000;
+  let lastPositionRecalcAt = 0;
+  let anchorScanCacheAt = 0;
+  let anchorScanCacheEl = null;
 
   const MONTHS = Object.freeze({
     january: 1,
@@ -64,6 +74,28 @@
       await new Promise((r) => setTimeout(r, 50));
     }
     return true;
+  }
+
+  function isDailyIncomeEnabled() {
+    try {
+      const raw = localStorage.getItem(DAILY_INCOME_ENABLED_KEY);
+      if (raw == null) return true;
+      const normalized = String(raw).trim().toLowerCase();
+      return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function applyDailyIncomeEnabledState() {
+    const enabled = isDailyIncomeEnabled();
+    const bar = document.getElementById(BAR_ID);
+    if (bar) bar.style.display = enabled ? '' : 'none';
+    if (!enabled && pending) {
+      window.clearTimeout(pending);
+      pending = null;
+    }
+    return enabled;
   }
 
   function formatMoney(n) {
@@ -1220,7 +1252,7 @@
       try {
         const doc = iframe.contentDocument;
         if (doc) {
-          const obs = new MutationObserver(() => scheduleRecompute());
+          const obs = new MutationObserver(() => scheduleRecompute(false, 'mutation'));
           obs.observe(doc, { childList: true, subtree: true, characterData: true });
         }
       } catch (e) {
@@ -1483,19 +1515,31 @@
     });
 
     // Position it just above Udacity's bottom-right "Auto Refresh" box (if present).
-    const position = () => positionBar(bar);
+    const position = () => positionBar(bar, { force: true });
     position();
     window.addEventListener('resize', position);
 
     return bar;
   }
 
-  function findAutoRefreshBox() {
+  function findAutoRefreshBox({ force = false } = {}) {
+    if (!force && anchorScanCacheAt && Date.now() - anchorScanCacheAt < ANCHOR_SCAN_TTL_MS) {
+      if (anchorScanCacheEl && document.contains(anchorScanCacheEl)) return anchorScanCacheEl;
+      if (anchorScanCacheEl === null) return null;
+    }
+
+    const extensionBadge = document.getElementById('udacity-mentor-auto-refresh-badge');
+    if (extensionBadge) {
+      anchorScanCacheEl = extensionBadge;
+      anchorScanCacheAt = Date.now();
+      return extensionBadge;
+    }
+
     // Robust approach:
     // 1) find ANY element containing "Auto Refresh"
     // 2) walk up its ancestors to find the fixed/sticky container near bottom-right.
     const needleRe = /Auto\s+Refresh/i;
-    const all = Array.from(document.querySelectorAll('body *'));
+    const all = Array.from(document.querySelectorAll('div,section,aside,article,span,p,strong'));
 
     let best = null;
     let bestScore = -Infinity;
@@ -1540,12 +1584,17 @@
       }
     }
 
+    anchorScanCacheEl = best || null;
+    anchorScanCacheAt = Date.now();
     return best;
   }
 
-  function positionBar(bar) {
+  function positionBar(bar, { force = false } = {}) {
+    if (!bar) return;
+    if (!force && lastPositionRecalcAt && Date.now() - lastPositionRecalcAt < POSITION_RECALC_TTL_MS) return;
+    lastPositionRecalcAt = Date.now();
     try {
-      const anchor = findAutoRefreshBox();
+      const anchor = findAutoRefreshBox({ force });
       if (!anchor) {
         bar.style.right = `${DEFAULT_RIGHT_PX}px`;
         // If the widget exists but we couldn't detect it, this avoids overlap anyway.
@@ -1566,6 +1615,7 @@
   }
 
   function render({ reviews, questions, note }) {
+    if (!isDailyIncomeEnabled()) return;
     const bar = ensureBar();
     if (!bar) return;
     const target = getTargetDayParts();
@@ -2097,6 +2147,10 @@
   }
 
   async function recomputeAndRender({ force = false } = {}) {
+    if (!isDailyIncomeEnabled()) return;
+    if (!force && lastRecomputeFinishedAt && Date.now() - lastRecomputeFinishedAt < MIN_RECOMPUTE_INTERVAL_MS) {
+      return;
+    }
     if (recomputeInFlight) {
       recomputeQueued = true;
       return;
@@ -2372,6 +2426,7 @@
       }
       render({ reviews, questions, note: '' });
     } finally {
+      lastRecomputeFinishedAt = Date.now();
       recomputeInFlight = false;
       if (recomputeQueued) {
         recomputeQueued = false;
@@ -2382,12 +2437,16 @@
 
   // Auto-recompute when the History tables update.
   let pending = null;
-  function scheduleRecompute(immediate = false) {
+  function scheduleRecompute(immediate = false, source = 'generic') {
+    if (!isDailyIncomeEnabled()) return;
     if (pending) return;
+    const delay = immediate
+      ? 0
+      : (source === 'mutation' ? MUTATION_RECOMPUTE_MIN_DELAY_MS : 250);
     pending = window.setTimeout(() => {
       pending = null;
-      recomputeAndRender();
-    }, immediate ? 0 : 250);
+      recomputeAndRender({ force: immediate });
+    }, delay);
   }
 
   // Install discovery hooks as early as possible. With @run-at document-start,
@@ -2404,6 +2463,7 @@
   function bootUiIfReady() {
     if (uiBooted) return;
     if (!hasDomScaffold()) return;
+    if (!applyDailyIncomeEnabledState()) return;
 
     uiBooted = true;
     ensureBar();
@@ -2430,9 +2490,9 @@
           });
           if (onlyOurFrame) return;
         }
-        scheduleRecompute();
+        scheduleRecompute(false, 'mutation');
       });
-      obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+      obs.observe(document.body, { childList: true, subtree: true });
     }
 
     // Also re-check periodically (handles day rollover + cases where iframe loads later).
@@ -2443,11 +2503,24 @@
       const warmup = window.setInterval(() => {
         warmupTicks += 1;
         scheduleRecompute();
-        if (warmupTicks >= 20) window.clearInterval(warmup); // ~10s
-      }, 500);
+        if (warmupTicks >= 6) window.clearInterval(warmup); // ~6s
+      }, 1000);
       window.setInterval(() => scheduleRecompute(), 60_000);
     }
   }
+
+  function handleDailyIncomeToggle() {
+    const enabled = applyDailyIncomeEnabledState();
+    if (enabled) {
+      bootUiIfReady();
+      scheduleRecompute(true);
+    }
+  }
+
+  window.addEventListener(DAILY_INCOME_EVENT, handleDailyIncomeToggle);
+  window.addEventListener('storage', (event) => {
+    if (event.key === DAILY_INCOME_ENABLED_KEY) handleDailyIncomeToggle();
+  });
 
   // Try immediately, then on DOM milestones, and also via a DOM observer.
   bootUiIfReady();

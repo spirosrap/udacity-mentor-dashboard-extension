@@ -27,6 +27,7 @@ This extension combines both scripts into one package and adds a popup UI:
 - `bridge.js` runs as a normal extension content script for `chrome.runtime` messaging and `chrome.storage` support.
 - Click the extension icon to open a popup that:
   - Shows live Daily Income values (R/Q/T/status/date/details) from the page
+  - Lets you enable/disable Daily Income calculations
   - Shows Auto Refresh status text
   - Lets you enable/disable Auto Refresh actions without uninstalling the extension
   - Lets you hide/show the Daily Income and Auto Refresh boxes on the page

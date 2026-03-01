@@ -5,7 +5,10 @@
   const STYLE_ID = "udacity-mentor-dashboard-extension-visibility-style";
   const AUTO_REFRESH_ENABLED_KEY = "udacityMentorAutoRefreshEnabled";
   const AUTO_REFRESH_EVENT = "udacity-tools:auto-refresh-enabled";
+  const DAILY_INCOME_ENABLED_KEY = "udacityMentorDailyIncomeEnabled";
+  const DAILY_INCOME_EVENT = "udacity-tools:daily-income-enabled";
   const DEFAULT_PREFS = Object.freeze({
+    dailyIncomeEnabled: true,
     hideIncomeBox: false,
     hideAutoRefreshBox: false,
     autoRefreshEnabled: true,
@@ -13,6 +16,7 @@
 
   function normalizePrefs(raw) {
     return {
+      dailyIncomeEnabled: raw?.dailyIncomeEnabled !== false,
       hideIncomeBox: !!raw?.hideIncomeBox,
       hideAutoRefreshBox: !!raw?.hideAutoRefreshBox,
       autoRefreshEnabled: raw?.autoRefreshEnabled !== false,
@@ -91,6 +95,24 @@
     }
   }
 
+  function syncDailyIncomeEnabled(prefs) {
+    const enabled = prefs?.dailyIncomeEnabled !== false;
+    try {
+      window.localStorage.setItem(DAILY_INCOME_ENABLED_KEY, enabled ? "1" : "0");
+    } catch (_) {
+      // ignore
+    }
+    try {
+      window.dispatchEvent(
+        new CustomEvent(DAILY_INCOME_EVENT, {
+          detail: { enabled },
+        }),
+      );
+    } catch (_) {
+      // ignore
+    }
+  }
+
   function text(root, selector) {
     const node = root ? root.querySelector(selector) : null;
     return (node?.textContent || "").trim();
@@ -161,6 +183,7 @@
     const saved = await setPrefs(next);
     applyPrefs(saved.prefs);
     syncAutoRefreshEnabled(saved.prefs);
+    syncDailyIncomeEnabled(saved.prefs);
     sendResponse({
       ok: saved.ok,
       prefs: saved.prefs,
@@ -184,10 +207,12 @@
     .then((prefs) => {
       applyPrefs(prefs);
       syncAutoRefreshEnabled(prefs);
+      syncDailyIncomeEnabled(prefs);
     })
     .catch(() => {
       const fallback = { ...DEFAULT_PREFS };
       applyPrefs(fallback);
       syncAutoRefreshEnabled(fallback);
+      syncDailyIncomeEnabled(fallback);
     });
 })();
