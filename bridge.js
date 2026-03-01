@@ -8,18 +8,26 @@
   const DAILY_INCOME_ENABLED_KEY = "udacityMentorDailyIncomeEnabled";
   const DAILY_INCOME_EVENT = "udacity-tools:daily-income-enabled";
   const DEFAULT_PREFS = Object.freeze({
-    dailyIncomeEnabled: true,
+    dailyIncomeEnabled: false,
     hideIncomeBox: false,
     hideAutoRefreshBox: false,
-    autoRefreshEnabled: true,
+    autoRefreshEnabled: false,
   });
+
+  function hasOwn(obj, key) {
+    return !!obj && Object.prototype.hasOwnProperty.call(obj, key);
+  }
 
   function normalizePrefs(raw) {
     return {
-      dailyIncomeEnabled: raw?.dailyIncomeEnabled !== false,
+      dailyIncomeEnabled: hasOwn(raw, "dailyIncomeEnabled")
+        ? raw?.dailyIncomeEnabled !== false
+        : DEFAULT_PREFS.dailyIncomeEnabled,
       hideIncomeBox: !!raw?.hideIncomeBox,
       hideAutoRefreshBox: !!raw?.hideAutoRefreshBox,
-      autoRefreshEnabled: raw?.autoRefreshEnabled !== false,
+      autoRefreshEnabled: hasOwn(raw, "autoRefreshEnabled")
+        ? raw?.autoRefreshEnabled !== false
+        : DEFAULT_PREFS.autoRefreshEnabled,
     };
   }
 

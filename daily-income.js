@@ -79,11 +79,11 @@
   function isDailyIncomeEnabled() {
     try {
       const raw = localStorage.getItem(DAILY_INCOME_ENABLED_KEY);
-      if (raw == null) return true;
+      if (raw == null) return false;
       const normalized = String(raw).trim().toLowerCase();
       return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
     } catch (_) {
-      return true;
+      return false;
     }
   }
 
@@ -989,6 +989,7 @@
   }
 
   function installNetworkDiscoveryHooks() {
+    if (!isDailyIncomeEnabled()) return;
     if (discoveryInstalled || window.__tmUdacityDailyIncomeDiscoveryInstalled) return;
     discoveryInstalled = true;
     window.__tmUdacityDailyIncomeDiscoveryInstalled = true;
@@ -2451,7 +2452,7 @@
 
   // Install discovery hooks as early as possible. With @run-at document-start,
   // this captures API calls during initial app boot.
-  installNetworkDiscoveryHooks();
+  if (isDailyIncomeEnabled()) installNetworkDiscoveryHooks();
 
   // UI/DOM bootstrapping: on refresh, `document-start` can run before <head>/<body> exist.
   // If we inject too early, the bar can fail to mount and "disappear".
@@ -2512,6 +2513,7 @@
   function handleDailyIncomeToggle() {
     const enabled = applyDailyIncomeEnabledState();
     if (enabled) {
+      installNetworkDiscoveryHooks();
       bootUiIfReady();
       scheduleRecompute(true);
     }

@@ -26,6 +26,7 @@
   const USER_ENABLED_KEY = "udacityMentorAutoRefreshEnabled";
   const USER_ENABLED_EVENT = "udacity-tools:auto-refresh-enabled";
   const STORAGE_VERSION = 1;
+  const ENABLE_DOM_OBSERVER = false;
 
   let timeoutId = null;
   let observer = null;
@@ -72,11 +73,11 @@
   function isUserEnabled() {
     try {
       const raw = window.localStorage.getItem(USER_ENABLED_KEY);
-      if (raw == null) return true;
+      if (raw == null) return false;
       const normalized = String(raw).trim().toLowerCase();
       return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
     } catch {
-      return true;
+      return false;
     }
   }
 
@@ -397,16 +398,18 @@
     if (!stopped) scheduleNextTick();
     else startResumeWatcher();
 
-    // Stop quickly if the page updates and removes/locks the reviews refresh button.
-    observer = new MutationObserver(() => {
-      if (enforceUserSetting("enabled in popup")) return;
-      if (stopped) {
-        maybeResume("DOM update");
-        return;
-      }
-      if (shouldStop()) stop(STOP_REASON_REVIEWS_REFRESH_MISSING);
-    });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    // Optional observer path is disabled by default to avoid CPU churn on heavy pages.
+    if (ENABLE_DOM_OBSERVER) {
+      observer = new MutationObserver(() => {
+        if (enforceUserSetting("enabled in popup")) return;
+        if (stopped) {
+          maybeResume("DOM update");
+          return;
+        }
+        if (shouldStop()) stop(STOP_REASON_REVIEWS_REFRESH_MISSING);
+      });
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+    }
 
     // Best-effort persistence on refresh/close.
     window.addEventListener("beforeunload", () => {

@@ -32,3 +32,4 @@ This extension combines both scripts into one package and adds a popup UI:
   - Lets you enable/disable Auto Refresh actions without uninstalling the extension
   - Lets you hide/show the Daily Income and Auto Refresh boxes on the page
 - Visibility preferences are saved in extension storage and applied on reload.
+- Low-load defaults: Daily Income and Auto Refresh actions start disabled until you enable them in the popup.
