@@ -12,6 +12,10 @@ This extension combines both scripts into one package and adds a popup UI:
 - Daily Income Counter runs on: `https://mentor-dashboard.udacity.com/queue/*`
 - Auto Refresh runs on: `https://mentor-dashboard.udacity.com/*`
 
+## Popup demo
+
+![Udacity Mentor Tools popup demo](assets/extension-popup-demo.png)
+
 ## Install in Brave (or Chrome)
 
 1. Open `brave://extensions` (or `chrome://extensions`).
