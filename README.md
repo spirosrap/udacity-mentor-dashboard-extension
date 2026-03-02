@@ -21,26 +21,33 @@ This extension combines both scripts into one package and adds a popup UI:
 1. Open `brave://extensions` (or `chrome://extensions`).
 2. Enable **Developer mode**.
 3. Click **Load unpacked**.
-4. Select this folder:
-   - `/Users/spiros/udacity-mentor-dashboard-extension`
+4. Select the extension project folder (the one containing `manifest.json`).
 
-## Notes
+## How it works
 
 - `daily-income.js` is loaded at `document_start` so API discovery hooks are installed early.
 - `daily-income.js` and `auto-refresh.js` run in the page's main world to preserve Tampermonkey-like behavior.
 - `bridge.js` runs as a normal extension content script for `chrome.runtime` messaging and `chrome.storage` support.
-- Click the extension icon to open a popup that:
-  - Shows live Daily Income values (R/Q/T/status/date/details) from the page
-  - Keeps full Daily Income debug text behind a collapsed "Show debug info" section
-  - Lets you enable/disable Daily Income calculations
-  - Shows Auto Refresh status text
-  - Lets you enable/disable Auto Refresh actions without uninstalling the extension
-  - Lets you hide/show the Daily Income and Auto Refresh boxes on the page
+
+## Popup controls
+
+- Shows live Daily Income values (R/Q/T/status/date/details).
+- Keeps full Daily Income debug text behind a collapsed "Show debug info" section.
+- Lets you enable/disable Daily Income calculations.
+- Shows Auto Refresh status text.
+- Lets you enable/disable Auto Refresh actions.
+- Lets you hide/show the Daily Income and Auto Refresh boxes on the page.
+
+## Defaults and storage
+
 - Visibility preferences are saved in extension storage and applied on reload.
 - Low-load defaults: Daily Income starts disabled; Auto Refresh starts enabled.
 - Auto Refresh countdown resets when you manually reload the page.
+
+## Reliability improvements
+
 - Daily Income parsing now handles rows with multiple dollar amounts (for example payout + bonus) more accurately.
 - History parsing now reads semantic grid rows (`role=row`) with fallback logic, reducing missed entries when row action labels vary.
-- Discovery now avoids `certifications` false positives and can fall back to stronger API totals when History appears truncated.
+- Discovery avoids false-positive endpoints (for example `certifications`, `assigned`, and queue-style endpoints) and prioritizes completed/history sources.
 - API pagination now boosts page size (`per_page`) to reduce first-page-only undercount scenarios.
-- Daily total fallback now merges multiple discovered API seeds (including weak candidates) with cross-source dedupe for better completeness.
+- Day cache/lock entries are schema-versioned to avoid stale totals after major logic updates.
