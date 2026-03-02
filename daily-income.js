@@ -689,15 +689,22 @@
     if (!url) return -Infinity;
     const lower = String(url).toLowerCase();
     const isCertifications = lower.includes('/certifications') || lower.includes('certifications.json');
+    const isAssigned = lower.includes('/assigned') || lower.includes('assigned.json');
+    const isQueueish = lower.includes('/queue') || lower.includes('/active') || lower.includes('/pending');
     const hasReviewHint = /(^|[\/_.-])review(s)?([\/_.-]|$)/.test(lower);
     const hasQuestionHint = /(^|[\/_.-])(question|questions|comment|comments|answer|answers)([\/_.-]|$)/.test(lower);
     if (isCertifications && !includeWeak) return -Infinity;
+    if ((isAssigned || isQueueish) && !includeWeak) return -Infinity;
     if (type === 'review') {
       if (!includeWeak && !hasReviewHint) return -Infinity;
       if (hasQuestionHint && !hasReviewHint) return -Infinity;
+      const looksCompleted = lower.includes('/submissions/completed') || lower.includes('completed') || lower.includes('history');
+      if (!includeWeak && !looksCompleted) return -Infinity;
     } else if (type === 'question') {
       if (!includeWeak && !hasQuestionHint) return -Infinity;
       if (hasReviewHint && !hasQuestionHint) return -Infinity;
+      const looksCompleted = lower.includes('completed') || lower.includes('history');
+      if (!includeWeak && !looksCompleted) return -Infinity;
     }
     let score = 0;
     if (isCertifications) score -= 80;
@@ -2623,11 +2630,11 @@
 	            looksLikeSingleFullPage(questions, qp);
 
 	          if (historyLikelyTruncated && (force || Date.now() - lastApiFetchAt >= 3_000)) {
-	            const reviewUrls = pickDiscoveredApiUrls(discovery, 'review', { max: 4, includeWeak: false });
-	            let questionUrls = pickDiscoveredApiUrls(discovery, 'question', { max: 2, includeWeak: false });
+	            const reviewUrls = pickDiscoveredApiUrls(discovery, 'review', { max: 1, includeWeak: false });
+	            let questionUrls = pickDiscoveredApiUrls(discovery, 'question', { max: 1, includeWeak: false });
 	            const questionUrlsWereDiscovered = questionUrls.length > 0;
 	            if (!questionUrlsWereDiscovered && reviewUrls.length) {
-	              questionUrls = appendDerivedQuestionUrls(reviewUrls, questionUrls, 2);
+	              questionUrls = appendDerivedQuestionUrls(reviewUrls, questionUrls, 1);
 	            }
 	            const urls = [
 	              ...reviewUrls.map((url) => ({ type: 'review', url })),
@@ -2720,11 +2727,11 @@
             note: 'Loading totals from API…',
           });
 
-	          const reviewUrls = pickDiscoveredApiUrls(discovery, 'review', { max: 4, includeWeak: false });
-	          let questionUrls = pickDiscoveredApiUrls(discovery, 'question', { max: 2, includeWeak: false });
+	          const reviewUrls = pickDiscoveredApiUrls(discovery, 'review', { max: 1, includeWeak: false });
+	          let questionUrls = pickDiscoveredApiUrls(discovery, 'question', { max: 1, includeWeak: false });
 	          const questionUrlsWereDiscovered = questionUrls.length > 0;
 	          if (!questionUrlsWereDiscovered && reviewUrls.length) {
-	            questionUrls = appendDerivedQuestionUrls(reviewUrls, questionUrls, 2);
+	            questionUrls = appendDerivedQuestionUrls(reviewUrls, questionUrls, 1);
 	          }
 	          const urls = [
 	            ...reviewUrls.map((url) => ({ type: 'review', url })),
