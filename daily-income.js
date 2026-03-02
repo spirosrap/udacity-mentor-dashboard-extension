@@ -28,6 +28,7 @@
   const DISCOVERY_LOG_MAX_CHARS = 8000;
   const CACHE_KEY = 'tmUdacityDailyIncomeCache';
   const BEST_LOCK_KEY = 'tmUdacityDailyIncomeBestByDay';
+  const DAY_TOTALS_SCHEMA_VERSION = 2;
   let recomputeInFlight = false;
   let recomputeQueued = false;
   let lastRecomputeFinishedAt = 0;
@@ -967,6 +968,11 @@
     return false;
   }
 
+  function isDayPayloadSchemaCurrent(payload) {
+    if (!payload || typeof payload !== 'object') return false;
+    return Number(payload.schemaVersion || 0) === DAY_TOTALS_SCHEMA_VERSION;
+  }
+
   function clearBestLock(dayKey) {
     if (!dayKey) return;
     const all = loadBestByDay();
@@ -979,6 +985,10 @@
   function loadBestLock(dayKey) {
     const all = loadBestByDay();
     const val = (all && typeof all === 'object') ? (all[dayKey] || null) : null;
+    if (val && !isDayPayloadSchemaCurrent(val)) {
+      clearBestLock(dayKey);
+      return null;
+    }
     if (val && isLikelyCorruptDayPayload(val)) {
       clearBestLock(dayKey);
       return null;
@@ -990,9 +1000,11 @@
     if (!dayKey || !payload) return;
     if (isLikelyCorruptDayPayload(payload)) return;
     const all = loadBestByDay();
-    const prev = (all && typeof all === 'object') ? (all[dayKey] || null) : null;
+    const prevRaw = (all && typeof all === 'object') ? (all[dayKey] || null) : null;
+    const prev = (prevRaw && isDayPayloadSchemaCurrent(prevRaw)) ? prevRaw : null;
     if (!shouldOverwriteDayCache(prev, payload)) return;
     const next = {
+      schemaVersion: DAY_TOTALS_SCHEMA_VERSION,
       reviews: payload.reviews || 0,
       questions: payload.questions || 0,
       countedReviews: payload.countedReviews || 0,
@@ -2497,7 +2509,12 @@
 
   function loadDayCache(cache, dayKey) {
     if (!cache || typeof cache !== 'object') return null;
-    const sanitize = (v) => (isLikelyCorruptDayPayload(v) ? null : v);
+    const sanitize = (v) => {
+      if (!v || typeof v !== 'object') return null;
+      if (!isDayPayloadSchemaCurrent(v)) return null;
+      if (isLikelyCorruptDayPayload(v)) return null;
+      return v;
+    };
     const byDayVal = sanitize((cache.byDay && typeof cache.byDay === 'object' && cache.byDay[dayKey]) ? cache.byDay[dayKey] : null);
     const bestVal = sanitize((cache.bestByDay && typeof cache.bestByDay === 'object' && cache.bestByDay[dayKey]) ? cache.bestByDay[dayKey] : null);
     const lockVal = sanitize(loadBestLock(dayKey));
@@ -2507,15 +2524,7 @@
       if (!winner || shouldOverwriteDayCache(winner, lockVal)) winner = lockVal || winner;
       return winner;
     }
-    // Legacy format: single "today" payload
-    if (cache.today && sameYMD(cache.today, parseDayKeyToParts(dayKey))) {
-      return {
-        reviews: cache.reviews,
-        questions: cache.questions,
-        countedReviews: cache.countedReviews,
-        countedQuestions: cache.countedQuestions,
-      };
-    }
+    // Ignore legacy single-day cache shape to avoid carrying forward stale totals.
     return null;
   }
 
@@ -2525,6 +2534,7 @@
     const byDay = (existing.byDay && typeof existing.byDay === 'object') ? existing.byDay : {};
     const bestByDay = (existing.bestByDay && typeof existing.bestByDay === 'object') ? existing.bestByDay : {};
     byDay[dayKey] = {
+      schemaVersion: DAY_TOTALS_SCHEMA_VERSION,
       reviews: payload.reviews || 0,
       questions: payload.questions || 0,
       countedReviews: payload.countedReviews || 0,
