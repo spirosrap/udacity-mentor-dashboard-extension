@@ -2692,13 +2692,17 @@
 	                };
 	                const reviewEndpointReady = hasApiEndpoint(discovery, 'review') || (apiTotals.countedReviews || 0) > 0;
 	                const questionEndpointReady = hasApiEndpoint(discovery, 'question') || !!derivedQuestionEndpointHit || (apiTotals.countedQuestions || 0) > 0;
-	                if (!reviewEndpointReady) {
-	                  apiMergedTotals.reviews = Math.max(apiMergedTotals.reviews, payloadOut.reviews || 0, dayCache?.reviews || 0);
-	                  apiMergedTotals.countedReviews = Math.max(apiMergedTotals.countedReviews, payloadOut.countedReviews || 0, dayCache?.countedReviews || 0);
+	                const baseReviews = Math.max(payloadOut.reviews || 0, dayCache?.reviews || 0);
+	                const baseQuestions = Math.max(payloadOut.questions || 0, dayCache?.questions || 0);
+	                const baseReviewCount = Math.max(payloadOut.countedReviews || 0, dayCache?.countedReviews || 0);
+	                const baseQuestionCount = Math.max(payloadOut.countedQuestions || 0, dayCache?.countedQuestions || 0);
+	                if (!reviewEndpointReady || apiMergedTotals.reviews + 0.0001 < baseReviews) {
+	                  apiMergedTotals.reviews = Math.max(apiMergedTotals.reviews, baseReviews);
+	                  apiMergedTotals.countedReviews = Math.max(apiMergedTotals.countedReviews, baseReviewCount);
 	                }
-	                if (!questionEndpointReady) {
-	                  apiMergedTotals.questions = Math.max(apiMergedTotals.questions, payloadOut.questions || 0, dayCache?.questions || 0);
-	                  apiMergedTotals.countedQuestions = Math.max(apiMergedTotals.countedQuestions, payloadOut.countedQuestions || 0, dayCache?.countedQuestions || 0);
+	                if (!questionEndpointReady || apiMergedTotals.questions + 0.0001 < baseQuestions) {
+	                  apiMergedTotals.questions = Math.max(apiMergedTotals.questions, baseQuestions);
+	                  apiMergedTotals.countedQuestions = Math.max(apiMergedTotals.countedQuestions, baseQuestionCount);
 	                }
 	                if (shouldOverwriteDayCache(payloadOut, apiMergedTotals)) {
 	                  usedApiFallback = true;
@@ -2816,13 +2820,19 @@
           };
           const reviewEndpointReady = hasApiEndpoint(discovery, 'review') || (totals.countedReviews || 0) > 0;
           const questionEndpointReady = hasApiEndpoint(discovery, 'question') || !!derivedQuestionEndpointHit || (totals.countedQuestions || 0) > 0;
-          if (!reviewEndpointReady && dayCache) {
-            mergedTotals.reviews = Math.max(mergedTotals.reviews, dayCache.reviews || 0);
-            mergedTotals.countedReviews = Math.max(mergedTotals.countedReviews, dayCache.countedReviews || 0);
-          }
-          if (!questionEndpointReady && dayCache) {
-            mergedTotals.questions = Math.max(mergedTotals.questions, dayCache.questions || 0);
-            mergedTotals.countedQuestions = Math.max(mergedTotals.countedQuestions, dayCache.countedQuestions || 0);
+          if (dayCache) {
+            const cachedReviews = dayCache.reviews || 0;
+            const cachedQuestions = dayCache.questions || 0;
+            const cachedReviewCount = dayCache.countedReviews || 0;
+            const cachedQuestionCount = dayCache.countedQuestions || 0;
+            if (!reviewEndpointReady || mergedTotals.reviews + 0.0001 < cachedReviews) {
+              mergedTotals.reviews = Math.max(mergedTotals.reviews, cachedReviews);
+              mergedTotals.countedReviews = Math.max(mergedTotals.countedReviews, cachedReviewCount);
+            }
+            if (!questionEndpointReady || mergedTotals.questions + 0.0001 < cachedQuestions) {
+              mergedTotals.questions = Math.max(mergedTotals.questions, cachedQuestions);
+              mergedTotals.countedQuestions = Math.max(mergedTotals.countedQuestions, cachedQuestionCount);
+            }
           }
           const apiCounts = (mergedTotals.countedReviews || 0) + (mergedTotals.countedQuestions || 0);
 
