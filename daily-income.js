@@ -2684,20 +2684,36 @@
 	                if (apiSourceHits <= 0) throw new Error('No usable API endpoints responded');
 	                apiItems = dedupeItemsAcrossSources(apiItems);
 	                const apiTotals = computeTotalsFromItems(apiItems, targetDay);
-	                if (shouldOverwriteDayCache(payloadOut, apiTotals)) {
+	                const apiMergedTotals = {
+	                  reviews: apiTotals.reviews || 0,
+	                  questions: apiTotals.questions || 0,
+	                  countedReviews: apiTotals.countedReviews || 0,
+	                  countedQuestions: apiTotals.countedQuestions || 0,
+	                };
+	                const reviewEndpointReady = hasApiEndpoint(discovery, 'review') || (apiTotals.countedReviews || 0) > 0;
+	                const questionEndpointReady = hasApiEndpoint(discovery, 'question') || !!derivedQuestionEndpointHit || (apiTotals.countedQuestions || 0) > 0;
+	                if (!reviewEndpointReady) {
+	                  apiMergedTotals.reviews = Math.max(apiMergedTotals.reviews, payloadOut.reviews || 0, dayCache?.reviews || 0);
+	                  apiMergedTotals.countedReviews = Math.max(apiMergedTotals.countedReviews, payloadOut.countedReviews || 0, dayCache?.countedReviews || 0);
+	                }
+	                if (!questionEndpointReady) {
+	                  apiMergedTotals.questions = Math.max(apiMergedTotals.questions, payloadOut.questions || 0, dayCache?.questions || 0);
+	                  apiMergedTotals.countedQuestions = Math.max(apiMergedTotals.countedQuestions, payloadOut.countedQuestions || 0, dayCache?.countedQuestions || 0);
+	                }
+	                if (shouldOverwriteDayCache(payloadOut, apiMergedTotals)) {
 	                  usedApiFallback = true;
-	                  payloadOut = apiTotals;
+	                  payloadOut = apiMergedTotals;
 	                  reviewsOut = {
 	                    ...reviews,
-	                    sum: apiTotals.reviews,
-	                    rowsCounted: apiTotals.countedReviews,
-	                    rowsSeen: Math.max(reviews.rowsSeen || 0, apiTotals.countedReviews || 0),
+	                    sum: apiMergedTotals.reviews,
+	                    rowsCounted: apiMergedTotals.countedReviews,
+	                    rowsSeen: Math.max(reviews.rowsSeen || 0, apiMergedTotals.countedReviews || 0),
 	                  };
 	                  questionsOut = {
 	                    ...questions,
-	                    sum: apiTotals.questions,
-	                    rowsCounted: apiTotals.countedQuestions,
-	                    rowsSeen: Math.max(questions.rowsSeen || 0, apiTotals.countedQuestions || 0),
+	                    sum: apiMergedTotals.questions,
+	                    rowsCounted: apiMergedTotals.countedQuestions,
+	                    rowsSeen: Math.max(questions.rowsSeen || 0, apiMergedTotals.countedQuestions || 0),
 	                  };
 	                }
 	              } catch (_) {
@@ -2798,8 +2814,8 @@
             countedReviews: totals.countedReviews || 0,
             countedQuestions: totals.countedQuestions || 0,
           };
-          const reviewEndpointReady = hasApiEndpoint(discovery, 'review') || reviewPages > 0 || (totals.countedReviews || 0) > 0;
-          const questionEndpointReady = hasApiEndpoint(discovery, 'question') || !!derivedQuestionEndpointHit || questionPages > 0 || (totals.countedQuestions || 0) > 0;
+          const reviewEndpointReady = hasApiEndpoint(discovery, 'review') || (totals.countedReviews || 0) > 0;
+          const questionEndpointReady = hasApiEndpoint(discovery, 'question') || !!derivedQuestionEndpointHit || (totals.countedQuestions || 0) > 0;
           if (!reviewEndpointReady && dayCache) {
             mergedTotals.reviews = Math.max(mergedTotals.reviews, dayCache.reviews || 0);
             mergedTotals.countedReviews = Math.max(mergedTotals.countedReviews, dayCache.countedReviews || 0);
