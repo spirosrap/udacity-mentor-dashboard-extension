@@ -3005,6 +3005,10 @@
   let pending = null;
   function scheduleRecompute(immediate = false, source = 'generic') {
     if (!isDailyIncomeEnabled()) return;
+    if (pending && immediate) {
+      window.clearTimeout(pending);
+      pending = null;
+    }
     if (pending) return;
     const delay = immediate
       ? 0
@@ -3025,6 +3029,7 @@
   let bodyObserverInstalled = false;
   let warmupInstalled = false;
   let domObserverInstalled = false;
+  let queueResyncHooksInstalled = false;
 
   function bootUiIfReady() {
     if (uiBooted) return;
@@ -3058,7 +3063,7 @@
         }
         scheduleRecompute(false, 'mutation');
       });
-      obs.observe(document.body, { childList: true, subtree: true });
+      obs.observe(document.body, { childList: true, subtree: true, characterData: true });
     }
 
     // Also re-check periodically (handles day rollover + cases where iframe loads later).
@@ -3075,6 +3080,24 @@
         if (warmupTicks >= warmupLimit) window.clearInterval(warmup);
       }, warmupEveryMs);
       window.setInterval(() => scheduleRecompute(), 60_000);
+    }
+
+    // Re-sync when returning to this page after completing work in another route/tab.
+    if (!queueResyncHooksInstalled) {
+      queueResyncHooksInstalled = true;
+      window.addEventListener('pageshow', (event) => {
+        if (!isDailyIncomeEnabled()) return;
+        // BFCache restores frequently skip normal startup observers; force an immediate recompute.
+        scheduleRecompute(!!event?.persisted, 'lifecycle');
+      });
+      window.addEventListener('focus', () => {
+        if (!isDailyIncomeEnabled()) return;
+        scheduleRecompute(true, 'lifecycle');
+      });
+      document.addEventListener('visibilitychange', () => {
+        if (!isDailyIncomeEnabled()) return;
+        if (document.visibilityState === 'visible') scheduleRecompute(true, 'lifecycle');
+      });
     }
   }
 
