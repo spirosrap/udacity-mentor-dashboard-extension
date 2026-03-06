@@ -7,6 +7,8 @@
   const AUTO_REFRESH_EVENT = "udacity-tools:auto-refresh-enabled";
   const DAILY_INCOME_ENABLED_KEY = "udacityMentorDailyIncomeEnabled";
   const DAILY_INCOME_EVENT = "udacity-tools:daily-income-enabled";
+  const LEDGER_KEY = "tmUdacityDailyIncomeLedger";
+  const LEDGER_TIME_ZONE = "Europe/Athens";
   const DEFAULT_PREFS = Object.freeze({
     dailyIncomeEnabled: false,
     hideIncomeBox: false,
@@ -170,6 +172,39 @@
     };
   }
 
+  function getTodayDayKey() {
+    try {
+      return new Intl.DateTimeFormat("en-CA", {
+        timeZone: LEDGER_TIME_ZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(new Date());
+    } catch (_) {
+      return new Date().toISOString().slice(0, 10);
+    }
+  }
+
+  function getLedgerState() {
+    let ledger = null;
+    try {
+      const raw = window.localStorage.getItem(LEDGER_KEY);
+      ledger = raw ? JSON.parse(raw) : null;
+    } catch (_) {
+      ledger = null;
+    }
+
+    const today = getTodayDayKey();
+    return {
+      present: !!(ledger && typeof ledger === "object" && ledger.byDay && typeof ledger.byDay === "object"),
+      ledger,
+      today,
+      currentMonth: today.slice(0, 7),
+      timeZone: LEDGER_TIME_ZONE,
+      pageUrl: location.href,
+    };
+  }
+
   async function handleGetState(sendResponse) {
     const prefs = await getPrefs();
     applyPrefs(prefs);
@@ -198,6 +233,13 @@
     });
   }
 
+  function handleGetLedger(sendResponse) {
+    sendResponse({
+      ok: true,
+      ledger: getLedgerState(),
+    });
+  }
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message.type !== "string") return;
 
@@ -208,6 +250,10 @@
     if (message.type === "udacity-tools:set-prefs") {
       handleSetPrefs(message, sendResponse);
       return true;
+    }
+    if (message.type === "udacity-tools:get-ledger") {
+      handleGetLedger(sendResponse);
+      return;
     }
   });
 

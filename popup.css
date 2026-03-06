@@ -4,7 +4,7 @@
 
 body {
   margin: 0;
-  font: 13px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  font: 13px/1.35 "Avenir Next", "IBM Plex Sans", "Segoe UI", sans-serif;
   color: #e7e7e7;
   background: #0f1115;
 }
@@ -93,4 +93,20 @@ h2 {
 
 #refresh-btn:hover {
   background: #2a3f66;
+}
+
+.secondary-btn {
+  width: 100%;
+  margin-top: 10px;
+  border: 1px solid #38506b;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #1b2638;
+  color: #dce7f5;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.secondary-btn:hover {
+  background: #22314a;
 }

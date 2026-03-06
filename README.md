@@ -32,6 +32,7 @@ This extension combines both scripts into one package and adds a popup UI:
 ## Popup controls
 
 - Shows live Daily Income values (R/Q/T/status/date/details).
+- Includes an "Open Ledger Table" action that opens a dedicated extension page for the stored per-day ledger.
 - Keeps full Daily Income debug text behind a collapsed "Show debug info" section.
 - Lets you enable/disable Daily Income calculations.
 - Shows Auto Refresh status text.
@@ -44,6 +45,7 @@ This extension combines both scripts into one package and adds a popup UI:
 - Low-load defaults: Daily Income starts disabled; Auto Refresh starts enabled.
 - Auto Refresh countdown resets when you manually reload the page.
 - Daily Income also keeps a bounded per-day ledger in page `localStorage` under `tmUdacityDailyIncomeLedger`, seeded from existing cache and refreshed with a once-per-day current-month backfill.
+- The ledger page reads that stored data from the active Udacity tab without refreshing the dashboard.
 
 ## Reliability improvements
 

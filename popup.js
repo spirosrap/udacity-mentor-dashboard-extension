@@ -18,6 +18,7 @@ const elToggleAutoRefreshEnabled = document.getElementById("toggle-auto-refresh-
 const elToggleIncome = document.getElementById("toggle-income");
 const elToggleRefresh = document.getElementById("toggle-refresh");
 const elRefreshButton = document.getElementById("refresh-btn");
+const elOpenLedgerButton = document.getElementById("open-ledger-btn");
 
 let activeTabId = null;
 
@@ -165,6 +166,22 @@ async function savePrefs() {
   }
 }
 
+async function openLedgerPage() {
+  try {
+    if (!activeTabId) {
+      await loadState();
+      if (!activeTabId) {
+        setStatus("Open a mentor-dashboard.udacity.com tab first.");
+        return;
+      }
+    }
+    const url = chrome.runtime.getURL(`ledger.html?tabId=${encodeURIComponent(String(activeTabId))}`);
+    chrome.tabs.create({ url });
+  } catch (_) {
+    setStatus("Could not open ledger page.");
+  }
+}
+
 elToggleDailyIncomeEnabled.addEventListener("change", () => {
   savePrefs();
 });
@@ -183,6 +200,10 @@ elToggleRefresh.addEventListener("change", () => {
 
 elRefreshButton.addEventListener("click", () => {
   loadState();
+});
+
+elOpenLedgerButton.addEventListener("click", () => {
+  openLedgerPage();
 });
 
 loadState();

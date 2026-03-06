@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Udacity Daily Income Ledger</title>
+    <link rel="stylesheet" href="ledger.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Udacity Mentor Dashboard Tools</p>
+          <h1>Daily Income Ledger</h1>
+          <p id="hero-status" class="hero-copy">Loading stored ledger from the selected Udacity tab...</p>
+        </div>
+        <div class="hero-actions">
+          <label class="month-picker">
+            <span>Month</span>
+            <input id="month-input" type="month" />
+          </label>
+          <button id="refresh-btn" type="button">Refresh Ledger</button>
+        </div>
+      </section>
+
+      <section class="summary-grid">
+        <article class="summary-card">
+          <span class="summary-label">Month Total</span>
+          <strong id="summary-total" class="summary-value">-</strong>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Reviews</span>
+          <strong id="summary-reviews" class="summary-value">-</strong>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Questions</span>
+          <strong id="summary-questions" class="summary-value">-</strong>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Stored Days</span>
+          <strong id="summary-days" class="summary-value">-</strong>
+        </article>
+      </section>
+
+      <section class="table-card">
+        <div class="table-header">
+          <div>
+            <h2>Per-Day Income</h2>
+            <p id="table-subtitle" class="table-subtitle">-</p>
+          </div>
+          <p id="sync-meta" class="sync-meta">-</p>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Reviews</th>
+                <th>Questions</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody id="ledger-body">
+              <tr>
+                <td colspan="4" class="empty-row">Loading...</td>
+              </tr>
+            </tbody>
+            <tfoot>
+              <tr>
+                <th>Month Total</th>
+                <th id="footer-reviews">-</th>
+                <th id="footer-questions">-</th>
+                <th id="footer-total">-</th>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="ledger.js"></script>
+  </body>
+</html>
