@@ -664,17 +664,77 @@
     }
   }
 
+  function getApiEndpointUrl(discovery, type) {
+    if (!discovery?.endpoints) return '';
+    if (type === 'review') return discovery.endpoints.reviews ? String(discovery.endpoints.reviews) : '';
+    if (type === 'question') return discovery.endpoints.questions ? String(discovery.endpoints.questions) : '';
+    return '';
+  }
+
+  function isHttpSuccessStatus(status) {
+    const n = Number(status);
+    return Number.isFinite(n) && n >= 200 && n < 300;
+  }
+
+  function getEndpointHealth(discovery, type) {
+    const url = getApiEndpointUrl(discovery, type);
+    if (!url) return null;
+
+    const typed = discovery?.endpointStatus?.[type];
+    if (typed && String(typed.url || '') === url) {
+      return {
+        url,
+        status: Number(typed.status),
+        at: typed.at,
+      };
+    }
+
+    const lastFetchUrl = discovery?.lastFetchUrl ? String(discovery.lastFetchUrl) : '';
+    if (lastFetchUrl === url) {
+      return {
+        url,
+        status: Number(discovery.lastFetchStatus),
+        at: discovery.lastFetchAt,
+      };
+    }
+
+    const lastXhrUrl = discovery?.lastXhrUrl ? String(discovery.lastXhrUrl) : '';
+    if (lastXhrUrl === url) {
+      return {
+        url,
+        status: Number(discovery.lastXhrStatus),
+        at: discovery.lastXhrAt,
+      };
+    }
+
+    return null;
+  }
+
+  function rememberEndpointHealth(discovery, type, url, status) {
+    if (!discovery || !type || !url) return;
+    discovery.endpointStatus = (discovery.endpointStatus && typeof discovery.endpointStatus === 'object')
+      ? discovery.endpointStatus
+      : {};
+    discovery.endpointStatus[type] = {
+      url: String(url),
+      status: Number(status),
+      at: Date.now(),
+    };
+    if (!isHttpSuccessStatus(status) && discovery.endpoints && String(discovery.endpoints[type] || '') === String(url)) {
+      delete discovery.endpoints[type];
+    }
+  }
+
   function hasAnyApiEndpoint(discovery) {
-    const r = discovery?.endpoints?.reviews ? String(discovery.endpoints.reviews) : '';
-    const q = discovery?.endpoints?.questions ? String(discovery.endpoints.questions) : '';
-    return !!(isUsableApiEndpointUrl(r) || isUsableApiEndpointUrl(q));
+    return hasApiEndpoint(discovery, 'review') || hasApiEndpoint(discovery, 'question');
   }
 
   function hasApiEndpoint(discovery, type) {
-    if (!discovery?.endpoints) return false;
-    if (type === 'review') return isUsableApiEndpointUrl(discovery.endpoints.reviews);
-    if (type === 'question') return isUsableApiEndpointUrl(discovery.endpoints.questions);
-    return false;
+    const url = getApiEndpointUrl(discovery, type);
+    if (!isUsableApiEndpointUrl(url)) return false;
+    const health = getEndpointHealth(discovery, type);
+    if (!health) return true;
+    return isHttpSuccessStatus(health.status);
   }
 
   function isUsableApiEndpointUrl(u) {
@@ -688,6 +748,7 @@
 
   function scoreDiscoveredApiUrl(url, type, candidate = null, { includeWeak = false } = {}) {
     if (!url) return -Infinity;
+    if (candidate && 'status' in candidate && !isHttpSuccessStatus(candidate.status)) return -Infinity;
     const lower = String(url).toLowerCase();
     const isCertifications = lower.includes('/certifications') || lower.includes('certifications.json');
     const isAssigned = lower.includes('/assigned') || lower.includes('assigned.json');
@@ -745,17 +806,18 @@
 
   function pickDiscoveredApiUrls(discovery, type, { max = 3, includeWeak = false } = {}) {
     const choices = [];
-    const direct = discovery?.endpoints?.[type === 'review' ? 'reviews' : 'questions'];
-    if (direct) choices.push({ url: String(direct), candidate: null });
+    const direct = getApiEndpointUrl(discovery, type);
+    if (direct && hasApiEndpoint(discovery, type)) choices.push({ url: String(direct), candidate: null });
     const lastParsed = discovery?.lastParsed?.url;
     if (lastParsed) choices.push({ url: String(lastParsed), candidate: discovery?.lastParsed || null });
     const lastFetch = discovery?.lastFetchUrl;
-    if (lastFetch) choices.push({ url: String(lastFetch), candidate: null });
+    if (lastFetch && isHttpSuccessStatus(discovery?.lastFetchStatus)) choices.push({ url: String(lastFetch), candidate: null });
     const lastXhr = discovery?.lastXhrUrl;
-    if (lastXhr) choices.push({ url: String(lastXhr), candidate: null });
+    if (lastXhr && isHttpSuccessStatus(discovery?.lastXhrStatus)) choices.push({ url: String(lastXhr), candidate: null });
     const candidates = Array.isArray(discovery?.candidates) ? discovery.candidates : [];
     for (const c of candidates) {
       if (!c || !c.url) continue;
+      if ('status' in c && !isHttpSuccessStatus(c.status)) continue;
       choices.push({ url: String(c.url), candidate: c });
     }
 
@@ -1027,9 +1089,10 @@
     if (!key) return;
     const d = loadDiscovery() || {};
     d.endpoints = d.endpoints || {};
-    const current = d.endpoints[key] ? String(d.endpoints[key]) : '';
+    const current = getApiEndpointUrl(d, type);
     if (current && canonicalSeedUrl(current) === canonicalSeedUrl(url)) return;
-    if (current && isUsableApiEndpointUrl(current)) return;
+    if (current && hasApiEndpoint(d, type)) return;
+    rememberEndpointHealth(d, type, url, 200);
     d.endpoints[key] = url;
     saveDiscovery(d);
   }
@@ -1516,12 +1579,14 @@
                 const urlLower = String(url).toLowerCase();
                 const inferredType = urlLower.includes('review') ? 'review'
                   : (urlLower.includes('question') ? 'question' : undefined);
+                rememberEndpointHealth(d, inferredType, url, res.status);
                 const items = extractItemsFromAny(json, inferredType);
                 const summary = summarizeItems(items);
                 const keyHints = collectKeyHints(json);
                 d.lastParsed = {
                   at: Date.now(),
                   url,
+                  status: res.status,
                   items: summary.itemsTotal,
                   reviewItems: summary.reviewItems,
                   questionItems: summary.questionItems,
@@ -1544,19 +1609,21 @@
                 // Pick the endpoint with the highest score and never keep known false positives.
                 const reviewScore = scoreDiscoveredApiUrl(url, 'review', { reviewItems: summary.reviewItems });
                 const currentReviewScore = scoreDiscoveredApiUrl(d.endpoints.reviews, 'review', { reviewItems: d.best.reviews || 0 });
-                if (reviewScore > -Infinity && summary.reviewItems >= 3 && reviewScore >= currentReviewScore) {
-                  d.best.reviews = Math.max(d.best.reviews || 0, summary.reviewItems);
-                  d.endpoints.reviews = url;
-                } else if (inferredType === 'review' && reviewScore > -Infinity && (!d.endpoints.reviews || !isUsableApiEndpointUrl(d.endpoints.reviews))) {
-                  // If the URL clearly looks like the reviews endpoint but there are too few/zero items,
-                  // still record it so API pagination can work.
-                  d.endpoints.reviews = url;
-                }
-                if (summary.questionItems >= 3 && summary.questionItems >= (d.best.questions || 0)) {
-                  d.best.questions = summary.questionItems;
-                  d.endpoints.questions = url;
-                } else if (inferredType === 'question' && !d.endpoints.questions) {
-                  d.endpoints.questions = url;
+                if (res.ok) {
+                  if (reviewScore > -Infinity && summary.reviewItems >= 3 && reviewScore >= currentReviewScore) {
+                    d.best.reviews = Math.max(d.best.reviews || 0, summary.reviewItems);
+                    d.endpoints.reviews = url;
+                  } else if (inferredType === 'review' && reviewScore > -Infinity && (!d.endpoints.reviews || !isUsableApiEndpointUrl(d.endpoints.reviews))) {
+                    // If the URL clearly looks like the reviews endpoint but there are too few/zero items,
+                    // still record it so API pagination can work.
+                    d.endpoints.reviews = url;
+                  }
+                  if (summary.questionItems >= 3 && summary.questionItems >= (d.best.questions || 0)) {
+                    d.best.questions = summary.questionItems;
+                    d.endpoints.questions = url;
+                  } else if (inferredType === 'question' && !d.endpoints.questions) {
+                    d.endpoints.questions = url;
+                  }
                 }
               } catch (_) {}
             }
@@ -1597,12 +1664,14 @@
                   const urlLower = String(_url).toLowerCase();
                   const inferredType = urlLower.includes('review') ? 'review'
                     : (urlLower.includes('question') ? 'question' : undefined);
+                  rememberEndpointHealth(d, inferredType, _url, xhr.status);
                   const items = extractItemsFromAny(json, inferredType);
                   const summary = summarizeItems(items);
                   const keyHints = collectKeyHints(json);
                   d.lastParsed = {
                     at: Date.now(),
                     url: _url,
+                    status: xhr.status,
                     items: summary.itemsTotal,
                     reviewItems: summary.reviewItems,
                     questionItems: summary.questionItems,
@@ -1623,17 +1692,19 @@
 
                   const reviewScore = scoreDiscoveredApiUrl(_url, 'review', { reviewItems: summary.reviewItems });
                   const currentReviewScore = scoreDiscoveredApiUrl(d.endpoints.reviews, 'review', { reviewItems: d.best.reviews || 0 });
-                  if (reviewScore > -Infinity && summary.reviewItems >= 3 && reviewScore >= currentReviewScore) {
-                    d.best.reviews = Math.max(d.best.reviews || 0, summary.reviewItems);
-                    d.endpoints.reviews = _url;
-                  } else if (inferredType === 'review' && reviewScore > -Infinity && (!d.endpoints.reviews || !isUsableApiEndpointUrl(d.endpoints.reviews))) {
-                    d.endpoints.reviews = _url;
-                  }
-                  if (summary.questionItems >= 3 && summary.questionItems >= (d.best.questions || 0)) {
-                    d.best.questions = summary.questionItems;
-                    d.endpoints.questions = _url;
-                  } else if (inferredType === 'question' && !d.endpoints.questions) {
-                    d.endpoints.questions = _url;
+                  if (isHttpSuccessStatus(xhr.status)) {
+                    if (reviewScore > -Infinity && summary.reviewItems >= 3 && reviewScore >= currentReviewScore) {
+                      d.best.reviews = Math.max(d.best.reviews || 0, summary.reviewItems);
+                      d.endpoints.reviews = _url;
+                    } else if (inferredType === 'review' && reviewScore > -Infinity && (!d.endpoints.reviews || !isUsableApiEndpointUrl(d.endpoints.reviews))) {
+                      d.endpoints.reviews = _url;
+                    }
+                    if (summary.questionItems >= 3 && summary.questionItems >= (d.best.questions || 0)) {
+                      d.best.questions = summary.questionItems;
+                      d.endpoints.questions = _url;
+                    } else if (inferredType === 'question' && !d.endpoints.questions) {
+                      d.endpoints.questions = _url;
+                    }
                   }
                 } catch (_) {}
               }
@@ -2121,10 +2192,10 @@
     setText('.tm-total-value', totalText);
     setText('.tm-status', statusText);
     const d = loadDiscovery();
-    const endpointReviewsRaw = d?.endpoints?.reviews ? String(d.endpoints.reviews) : '';
-    const endpointQuestionsRaw = d?.endpoints?.questions ? String(d.endpoints.questions) : '';
-    const endpointReviewsUsable = isUsableApiEndpointUrl(endpointReviewsRaw);
-    const endpointQuestionsUsable = isUsableApiEndpointUrl(endpointQuestionsRaw);
+    const endpointReviewsRaw = getApiEndpointUrl(d, 'review');
+    const endpointQuestionsRaw = getApiEndpointUrl(d, 'question');
+    const endpointReviewsUsable = hasApiEndpoint(d, 'review');
+    const endpointQuestionsUsable = hasApiEndpoint(d, 'question');
     const endpoints = d?.endpoints
       ? `Endpoints: reviews=${endpointReviewsRaw ? (endpointReviewsUsable ? 'yes' : 'ignored') : 'no'}, questions=${endpointQuestionsRaw ? (endpointQuestionsUsable ? 'yes' : 'ignored') : 'no'}.` +
         (endpointReviewsRaw ? ` reviewsUrl=${endpointReviewsRaw}` : '') +
@@ -2655,8 +2726,8 @@
 	              d2.endpoints = d2.endpoints || {};
 	              const preferredReview = pickDiscoveredApiUrl(discovery, 'review');
 	              const preferredQuestion = pickDiscoveredApiUrl(discovery, 'question');
-	              if (preferredReview && isUsableApiEndpointUrl(preferredReview)) d2.endpoints.reviews = preferredReview;
-	              if (preferredQuestion && isUsableApiEndpointUrl(preferredQuestion)) d2.endpoints.questions = preferredQuestion;
+	              if (preferredReview && hasApiEndpoint(discovery, 'review')) d2.endpoints.reviews = preferredReview;
+	              if (preferredQuestion && hasApiEndpoint(discovery, 'question')) d2.endpoints.questions = preferredQuestion;
 	              saveDiscovery(d2);
 	            }
 	            if (urls.length) {
@@ -2690,8 +2761,9 @@
 	                  countedReviews: apiTotals.countedReviews || 0,
 	                  countedQuestions: apiTotals.countedQuestions || 0,
 	                };
-	                const reviewEndpointReady = hasApiEndpoint(discovery, 'review') || (apiTotals.countedReviews || 0) > 0;
-	                const questionEndpointReady = hasApiEndpoint(discovery, 'question') || !!derivedQuestionEndpointHit || (apiTotals.countedQuestions || 0) > 0;
+	                const latestDiscovery = loadDiscovery() || discovery;
+	                const reviewEndpointReady = hasApiEndpoint(latestDiscovery, 'review') || (apiTotals.countedReviews || 0) > 0;
+	                const questionEndpointReady = hasApiEndpoint(latestDiscovery, 'question') || !!derivedQuestionEndpointHit || (apiTotals.countedQuestions || 0) > 0;
 	                const baseReviews = Math.max(payloadOut.reviews || 0, dayCache?.reviews || 0);
 	                const baseQuestions = Math.max(payloadOut.questions || 0, dayCache?.questions || 0);
 	                const baseReviewCount = Math.max(payloadOut.countedReviews || 0, dayCache?.countedReviews || 0);
@@ -2818,8 +2890,9 @@
             countedReviews: totals.countedReviews || 0,
             countedQuestions: totals.countedQuestions || 0,
           };
-          const reviewEndpointReady = hasApiEndpoint(discovery, 'review') || (totals.countedReviews || 0) > 0;
-          const questionEndpointReady = hasApiEndpoint(discovery, 'question') || !!derivedQuestionEndpointHit || (totals.countedQuestions || 0) > 0;
+          const latestDiscovery = loadDiscovery() || discovery;
+          const reviewEndpointReady = hasApiEndpoint(latestDiscovery, 'review') || (totals.countedReviews || 0) > 0;
+          const questionEndpointReady = hasApiEndpoint(latestDiscovery, 'question') || !!derivedQuestionEndpointHit || (totals.countedQuestions || 0) > 0;
           if (dayCache) {
             const cachedReviews = dayCache.reviews || 0;
             const cachedQuestions = dayCache.questions || 0;
