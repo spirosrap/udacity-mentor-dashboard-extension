@@ -43,6 +43,7 @@ This extension combines both scripts into one package and adds a popup UI:
 - Visibility preferences are saved in extension storage and applied on reload.
 - Low-load defaults: Daily Income starts disabled; Auto Refresh starts enabled.
 - Auto Refresh countdown resets when you manually reload the page.
+- Daily Income also keeps a bounded per-day ledger in page `localStorage` under `tmUdacityDailyIncomeLedger`, seeded from existing cache and refreshed with a once-per-day current-month backfill.
 
 ## Reliability improvements
 
@@ -50,4 +51,5 @@ This extension combines both scripts into one package and adds a popup UI:
 - History parsing now reads semantic grid rows (`role=row`) with fallback logic, reducing missed entries when row action labels vary.
 - Discovery avoids false-positive endpoints (for example `certifications`, `assigned`, and queue-style endpoints) and prioritizes completed/history sources.
 - API pagination now boosts page size (`per_page`) to reduce first-page-only undercount scenarios.
+- Question GraphQL pagination now advances `afterCursor` correctly, so current-month question backfills can span multiple pages.
 - Day cache/lock entries are schema-versioned to avoid stale totals after major logic updates.

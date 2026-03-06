@@ -28,7 +28,12 @@
   const DISCOVERY_LOG_MAX_CHARS = 8000;
   const CACHE_KEY = 'tmUdacityDailyIncomeCache';
   const BEST_LOCK_KEY = 'tmUdacityDailyIncomeBestByDay';
+  const LEDGER_KEY = 'tmUdacityDailyIncomeLedger';
   const DAY_TOTALS_SCHEMA_VERSION = 2;
+  const LEDGER_SCHEMA_VERSION = 1;
+  const LEDGER_MAX_DAYS = 400;
+  const MONTH_SYNC_RETRY_MS = 15 * 60 * 1000;
+  const DEFAULT_QUESTION_HISTORY_QUERY = 'query MentorDash_FetchHistory($count: Int, $afterCursor: String) { queue { history(first: $count, after: $afterCursor) { edges { cursor node { project { title } createdAt payment { amount currencyCode } type question { id } } } totalCount } } }';
   let recomputeInFlight = false;
   let recomputeQueued = false;
   let lastRecomputeFinishedAt = 0;
@@ -50,6 +55,8 @@
   let lastPositionRecalcAt = 0;
   let anchorScanCacheAt = 0;
   let anchorScanCacheEl = null;
+  let monthLedgerSyncInFlight = false;
+  let monthLedgerSyncRetryAt = 0;
 
   const MONTHS = Object.freeze({
     january: 1,
@@ -160,6 +167,43 @@
     if (a.m !== b.m) return a.m < b.m ? -1 : 1;
     if (a.d !== b.d) return a.d < b.d ? -1 : 1;
     return 0;
+  }
+
+  function addDays(parts, delta) {
+    if (!parts || !Number.isFinite(delta)) return parts || null;
+    const dt = new Date(Date.UTC(parts.y, parts.m - 1, parts.d + delta));
+    return {
+      y: dt.getUTCFullYear(),
+      m: dt.getUTCMonth() + 1,
+      d: dt.getUTCDate(),
+    };
+  }
+
+  function getMonthStartParts(parts) {
+    if (!parts) return null;
+    return { y: parts.y, m: parts.m, d: 1 };
+  }
+
+  function getMonthKey(parts) {
+    if (!parts) return '';
+    return `${parts.y}-${String(parts.m).padStart(2, '0')}`;
+  }
+
+  function buildDayKeysInRange(startParts, endParts, maxDays = LEDGER_MAX_DAYS) {
+    if (!startParts || !endParts) return [];
+    if (compareYMD(startParts, endParts) > 0) return [];
+    const out = [];
+    let cur = startParts;
+    while (compareYMD(cur, endParts) <= 0 && out.length < maxDays) {
+      out.push(partsToDayKey(cur));
+      cur = addDays(cur, 1);
+    }
+    return out;
+  }
+
+  function isWithinDayRange(parts, startParts, endParts) {
+    if (!parts || !startParts || !endParts) return false;
+    return compareYMD(parts, startParts) >= 0 && compareYMD(parts, endParts) <= 0;
   }
 
   function getTargetDayParts() {
@@ -712,6 +756,7 @@
 
   function rememberEndpointHealth(discovery, type, url, status) {
     if (!discovery || !type || !url) return;
+    const endpointKey = type === 'review' ? 'reviews' : (type === 'question' ? 'questions' : type);
     discovery.endpointStatus = (discovery.endpointStatus && typeof discovery.endpointStatus === 'object')
       ? discovery.endpointStatus
       : {};
@@ -720,8 +765,8 @@
       status: Number(status),
       at: Date.now(),
     };
-    if (!isHttpSuccessStatus(status) && discovery.endpoints && String(discovery.endpoints[type] || '') === String(url)) {
-      delete discovery.endpoints[type];
+    if (!isHttpSuccessStatus(status) && discovery.endpoints && String(discovery.endpoints[endpointKey] || '') === String(url)) {
+      delete discovery.endpoints[endpointKey];
     }
   }
 
@@ -1079,6 +1124,175 @@
     saveBestByDay(merged);
   }
 
+  function normalizeDayPayload(payload) {
+    return {
+      reviews: Number(payload?.reviews || 0),
+      questions: Number(payload?.questions || 0),
+      countedReviews: Math.max(0, Math.floor(Number(payload?.countedReviews || 0))),
+      countedQuestions: Math.max(0, Math.floor(Number(payload?.countedQuestions || 0))),
+    };
+  }
+
+  function compareDayPayloadQuality(a, b) {
+    if (!a && !b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    if (isLikelyCorruptDayPayload(a)) return -1;
+    if (isLikelyCorruptDayPayload(b)) return 1;
+    const aSum = Number(a.reviews || 0) + Number(a.questions || 0);
+    const bSum = Number(b.reviews || 0) + Number(b.questions || 0);
+    if (Math.abs(aSum - bSum) > 0.0001) return aSum > bSum ? 1 : -1;
+    const aCount = Math.max(0, Number(a.countedReviews || 0) + Number(a.countedQuestions || 0));
+    const bCount = Math.max(0, Number(b.countedReviews || 0) + Number(b.countedQuestions || 0));
+    if (aCount !== bCount) return aCount > bCount ? 1 : -1;
+    return 0;
+  }
+
+  function loadLedger() {
+    try {
+      const raw = localStorage.getItem(LEDGER_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      const byDay = {};
+      const source = (parsed && typeof parsed === 'object') ? parsed : {};
+      const rawByDay = (source.byDay && typeof source.byDay === 'object') ? source.byDay : {};
+      for (const [dayKey, entry] of Object.entries(rawByDay)) {
+        if (!parseDayKeyToParts(dayKey) || !entry || typeof entry !== 'object') continue;
+        const payload = normalizeDayPayload(entry);
+        if (isLikelyCorruptDayPayload(payload)) continue;
+        const total = payload.reviews + payload.questions;
+        byDay[dayKey] = {
+          schemaVersion: LEDGER_SCHEMA_VERSION,
+          reviews: payload.reviews,
+          questions: payload.questions,
+          countedReviews: payload.countedReviews,
+          countedQuestions: payload.countedQuestions,
+          total,
+          source: typeof entry.source === 'string' ? entry.source : 'unknown',
+          closed: !!entry.closed,
+          firstSeenAt: Number(entry.firstSeenAt || entry.at || Date.now()),
+          updatedAt: Number(entry.updatedAt || entry.at || Date.now()),
+        };
+      }
+      const monthSync = {};
+      const rawMonthSync = (source.monthSync && typeof source.monthSync === 'object') ? source.monthSync : {};
+      for (const [monthKey, entry] of Object.entries(rawMonthSync)) {
+        if (!/^\d{4}-\d{2}$/.test(monthKey) || !entry || typeof entry !== 'object') continue;
+        monthSync[monthKey] = {
+          at: Number(entry.at || 0),
+          dayKey: parseDayKeyToParts(entry.dayKey) ? entry.dayKey : '',
+          source: typeof entry.source === 'string' ? entry.source : '',
+        };
+      }
+      return {
+        schemaVersion: LEDGER_SCHEMA_VERSION,
+        byDay,
+        monthSync,
+      };
+    } catch (_) {
+      return {
+        schemaVersion: LEDGER_SCHEMA_VERSION,
+        byDay: {},
+        monthSync: {},
+      };
+    }
+  }
+
+  function saveLedger(obj) {
+    if (!obj || typeof obj !== 'object') return;
+    try {
+      const byDay = (obj.byDay && typeof obj.byDay === 'object') ? { ...obj.byDay } : {};
+      const keys = Object.keys(byDay).sort((a, b) => (a < b ? 1 : -1));
+      for (const k of keys.slice(LEDGER_MAX_DAYS)) delete byDay[k];
+      safeSetLocalStorage(LEDGER_KEY, JSON.stringify({
+        schemaVersion: LEDGER_SCHEMA_VERSION,
+        byDay,
+        monthSync: (obj.monthSync && typeof obj.monthSync === 'object') ? obj.monthSync : {},
+      }));
+    } catch (_) {}
+  }
+
+  function getLedgerSourceRank(source) {
+    switch (String(source || '').toLowerCase()) {
+      case 'api':
+      case 'month-api':
+      case 'month-sync':
+      case 'graphql':
+        return 4;
+      case 'history':
+        return 3;
+      case 'cache':
+        return 2;
+      case 'cache-seed':
+        return 1;
+      default:
+        return 0;
+    }
+  }
+
+  function upsertLedgerEntryIn(ledger, dayKey, payload, { source = 'unknown', closed, updatedAt } = {}) {
+    if (!ledger || !dayKey || !payload) return false;
+    const parsedDay = parseDayKeyToParts(dayKey);
+    if (!parsedDay) return false;
+    const normalized = normalizeDayPayload(payload);
+    if (isLikelyCorruptDayPayload(normalized)) return false;
+    const now = Number(updatedAt || Date.now());
+    const next = {
+      schemaVersion: LEDGER_SCHEMA_VERSION,
+      reviews: normalized.reviews,
+      questions: normalized.questions,
+      countedReviews: normalized.countedReviews,
+      countedQuestions: normalized.countedQuestions,
+      total: normalized.reviews + normalized.questions,
+      source: String(source || 'unknown'),
+      closed: closed == null ? compareYMD(parsedDay, getTodayParts(TODAY_TIME_ZONE)) < 0 : !!closed,
+      firstSeenAt: now,
+      updatedAt: now,
+    };
+    const prev = (ledger.byDay && typeof ledger.byDay === 'object') ? (ledger.byDay[dayKey] || null) : null;
+    if (prev) {
+      next.firstSeenAt = Number(prev.firstSeenAt || now);
+      const quality = compareDayPayloadQuality(next, prev);
+      if (quality < 0) return false;
+      if (quality === 0) {
+        const nextRank = getLedgerSourceRank(next.source);
+        const prevRank = getLedgerSourceRank(prev.source);
+        if (nextRank < prevRank) return false;
+        if (nextRank === prevRank && !(next.closed && !prev.closed) && next.updatedAt <= Number(prev.updatedAt || 0)) return false;
+      }
+    }
+    ledger.byDay = (ledger.byDay && typeof ledger.byDay === 'object') ? ledger.byDay : {};
+    ledger.byDay[dayKey] = next;
+    return true;
+  }
+
+  function seedLedgerFromExistingCaches() {
+    const ledger = loadLedger();
+    const cache = loadCache() || {};
+    const seeds = [];
+    const pushSeeds = (obj, source) => {
+      if (!obj || typeof obj !== 'object') return;
+      for (const [dayKey, entry] of Object.entries(obj)) {
+        if (!parseDayKeyToParts(dayKey) || !entry || typeof entry !== 'object') continue;
+        seeds.push({ dayKey, entry, source });
+      }
+    };
+    pushSeeds(cache.byDay, 'cache-seed');
+    pushSeeds(cache.bestByDay, 'cache-seed');
+    pushSeeds(loadBestByDay(), 'cache-seed');
+
+    let changed = false;
+    for (const seed of seeds) {
+      if (upsertLedgerEntryIn(ledger, seed.dayKey, seed.entry, {
+        source: seed.source,
+        closed: compareYMD(parseDayKeyToParts(seed.dayKey), getTodayParts(TODAY_TIME_ZONE)) < 0,
+        updatedAt: Number(seed.entry.at || Date.now()),
+      })) {
+        changed = true;
+      }
+    }
+    if (changed) saveLedger(ledger);
+  }
+
   function saveDiscovery(obj) {
     try { safeSetLocalStorage(DISCOVERY_KEY, JSON.stringify(obj)); } catch (_) {}
   }
@@ -1422,6 +1636,31 @@
       countedReviews,
       countedQuestions,
     };
+  }
+
+  function computeTotalsByDayFromItems(items, startDayParts, endDayParts) {
+    const byDay = {};
+    for (const it of items || []) {
+      const parts = getPartsForDate(it.completedDate, TODAY_TIME_ZONE);
+      if (!isWithinDayRange(parts, startDayParts, endDayParts)) continue;
+      const dayKey = partsToDayKey(parts);
+      if (!byDay[dayKey]) {
+        byDay[dayKey] = {
+          reviews: 0,
+          questions: 0,
+          countedReviews: 0,
+          countedQuestions: 0,
+        };
+      }
+      if (it.type === 'review') {
+        byDay[dayKey].reviews += it.earned;
+        byDay[dayKey].countedReviews += 1;
+      } else if (it.type === 'question') {
+        byDay[dayKey].questions += it.earned;
+        byDay[dayKey].countedQuestions += 1;
+      }
+    }
+    return byDay;
   }
 
   function summarizeItems(items) {
@@ -2309,6 +2548,18 @@
         const endCursor = typeof pi.endCursor === 'string' ? pi.endCursor : null;
         if (endCursor) return { hasNext, endCursor };
       }
+      if (Array.isArray(cur.edges) && cur.edges.length) {
+        const lastEdge = cur.edges[cur.edges.length - 1];
+        const edgeCursor = lastEdge && typeof lastEdge === 'object' && typeof lastEdge.cursor === 'string'
+          ? lastEdge.cursor
+          : null;
+        if (edgeCursor) {
+          let hasNext = null;
+          const totalCount = Number(cur.totalCount);
+          if (Number.isFinite(totalCount)) hasNext = cur.edges.length < totalCount;
+          return { hasNext, endCursor: edgeCursor };
+        }
+      }
       const hasNext = typeof cur.hasNextPage === 'boolean' ? cur.hasNextPage : null;
       const endCursor = typeof cur.endCursor === 'string' ? cur.endCursor : null;
       const nextCursor = typeof cur.nextCursor === 'string' ? cur.nextCursor : null;
@@ -2329,7 +2580,7 @@
     if (!body || typeof body !== 'object' || !endCursor) return body;
     const b = cloneJson(body) || body;
     b.variables = (b.variables && typeof b.variables === 'object') ? b.variables : {};
-    const keys = ['after', 'cursor', 'pageCursor', 'page_cursor', 'endCursor', 'end_cursor', 'starting_after', 'startingAfter'];
+    const keys = ['after', 'afterCursor', 'after_cursor', 'cursor', 'pageCursor', 'page_cursor', 'endCursor', 'end_cursor', 'starting_after', 'startingAfter'];
     let changed = false;
     for (const k of keys) {
       if (k in b.variables) {
@@ -2387,6 +2638,84 @@
     }
 
     return { items: matched, pagesFetched: page + 1 };
+  }
+
+  async function fetchGraphqlItemsForRangePaginated({ request, fallbackType, startDayParts, endDayParts }) {
+    const MAX_PAGES = 60;
+    const SLEEP_MS = 150;
+    const start = startDayParts || getMonthStartParts(getTodayParts(TODAY_TIME_ZONE));
+    const end = endDayParts || getTodayParts(TODAY_TIME_ZONE);
+    const url = request?.url;
+    const baseBody = request?.body;
+    if (!url || !baseBody || typeof baseBody !== 'object') throw new Error('No GraphQL request captured yet');
+
+    let body = cloneJson(baseBody) || baseBody;
+    let page = 0;
+    const matched = [];
+    const seenCursors = new Set();
+
+    while (page < MAX_PAGES) {
+      const resp = await fetch(url, {
+        method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          'content-type': 'application/json',
+          ...(request.headers || {}),
+        },
+        body: JSON.stringify(body),
+      });
+      const ct = (resp.headers.get('content-type') || '').toLowerCase();
+      if (!resp.ok) throw new Error(`GraphQL HTTP ${resp.status}`);
+      if (!ct.includes('application/json')) throw new Error('GraphQL not JSON');
+      const json = await resp.json();
+
+      const items = extractItemsFromAny(json, fallbackType);
+      let maxParts = null;
+      for (const it of items) {
+        const parts = getPartsForDate(it.completedDate, TODAY_TIME_ZONE);
+        if (!maxParts || compareYMD(parts, maxParts) > 0) maxParts = parts;
+        if (isWithinDayRange(parts, start, end)) matched.push(it);
+      }
+      if (maxParts && compareYMD(maxParts, start) < 0) break;
+
+      const cursorInfo = findCursorPageInfo(json);
+      if (!cursorInfo?.endCursor || cursorInfo.hasNext === false) break;
+      if (seenCursors.has(cursorInfo.endCursor)) break;
+      seenCursors.add(cursorInfo.endCursor);
+      body = updateGraphqlCursorVars(body, cursorInfo.endCursor);
+
+      page += 1;
+      await new Promise((r) => setTimeout(r, SLEEP_MS));
+    }
+
+    return { items: matched, pagesFetched: page + 1 };
+  }
+
+  function getDefaultReviewCompletedUrl() {
+    return `${window.location.origin}/api/review/v1/me/submissions/completed.json?page=1&per_page=200`;
+  }
+
+  function getDefaultQuestionHistoryRequest() {
+    return {
+      url: `${window.location.origin}/api/pensieve/graphql`,
+      headers: {},
+      body: {
+        operationName: 'MentorDash_FetchHistory',
+        variables: {
+          count: 100,
+          afterCursor: null,
+        },
+        query: DEFAULT_QUESTION_HISTORY_QUERY,
+      },
+    };
+  }
+
+  function getQuestionHistoryRequest(discovery) {
+    const gql = discovery?.graphql || {};
+    const known = gql.questions;
+    if (known?.url && known?.body && typeof known.body === 'object') return known;
+    return getDefaultQuestionHistoryRequest();
   }
 
   function parseLinkHeaderForRelNext(linkHeader, baseUrl) {
@@ -2578,6 +2907,71 @@
     return { items: matched, pagesFetched: page + 1, sawTarget, lastPageHadTarget, stoppedBecauseNoNext };
   }
 
+  async function fetchItemsForRangePaginated({ url, type, startDayParts, endDayParts }) {
+    const MAX_PAGES = 60;
+    const SLEEP_MS = 150;
+    const start = startDayParts || getMonthStartParts(getTodayParts(TODAY_TIME_ZONE));
+    const end = endDayParts || getTodayParts(TODAY_TIME_ZONE);
+
+    let curUrl = withLargePageSize(normalizeInitialPageUrl(url));
+    let page = 0;
+    const seenUrls = new Set();
+    const matched = [];
+
+    async function fetchJsonPage(pageUrl, allowSoftFail) {
+      try {
+        const resp = await fetch(pageUrl, { credentials: 'include', cache: 'no-store' });
+        const ct = (resp.headers.get('content-type') || '').toLowerCase();
+        if (!resp.ok) {
+          if (allowSoftFail) return null;
+          throw new Error(`API HTTP ${resp.status} for ${pageUrl}`);
+        }
+        if (!ct.includes('application/json')) {
+          if (allowSoftFail) return null;
+          throw new Error(`API not JSON for ${pageUrl}`);
+        }
+        const json = await resp.json();
+        const nextFromHeaders = findNextUrlInHeaders(resp.headers, pageUrl);
+        return { json, nextFromHeaders };
+      } catch (e) {
+        if (allowSoftFail) return null;
+        throw e;
+      }
+    }
+
+    while (curUrl && page < MAX_PAGES) {
+      if (seenUrls.has(curUrl)) break;
+      seenUrls.add(curUrl);
+
+      const pageResp = await fetchJsonPage(curUrl, page > 0);
+      if (!pageResp) break;
+      const { json, nextFromHeaders } = pageResp;
+      const items = extractItemsFromAny(json, type);
+      if (!items.length) break;
+
+      let maxParts = null;
+      for (const it of items) {
+        const parts = getPartsForDate(it.completedDate, TODAY_TIME_ZONE);
+        if (!maxParts || compareYMD(parts, maxParts) > 0) maxParts = parts;
+        if (isWithinDayRange(parts, start, end)) matched.push(it);
+      }
+
+      if (maxParts && compareYMD(maxParts, start) < 0) break;
+
+      const cursorInfo = findCursorPageInfo(json);
+      const nextFromPayload = findNextUrlInPayload(json, curUrl);
+      const nextFromQuery = deriveNextUrlFromQueryPaging(curUrl, page, cursorInfo);
+      const nextUrl = [nextFromHeaders, nextFromPayload, nextFromQuery].find((u) => u && u !== curUrl) || null;
+      if (!nextUrl) break;
+
+      curUrl = withLargePageSize(nextUrl);
+      page += 1;
+      await new Promise((r) => setTimeout(r, SLEEP_MS));
+    }
+
+    return { items: matched, pagesFetched: page + 1 };
+  }
+
   function loadDayCache(cache, dayKey) {
     if (!cache || typeof cache !== 'object') return null;
     const sanitize = (v) => {
@@ -2641,6 +3035,132 @@
     if (nxCount > exCount) return true;
     if (nxCount < exCount) return false;
     return true;
+  }
+
+  function recordLedgerEntry(dayKey, payload, source) {
+    if (!dayKey || !payload) return;
+    const ledger = loadLedger();
+    if (upsertLedgerEntryIn(ledger, dayKey, payload, {
+      source,
+      closed: compareYMD(parseDayKeyToParts(dayKey), getTodayParts(TODAY_TIME_ZONE)) < 0,
+      updatedAt: Date.now(),
+    })) {
+      saveLedger(ledger);
+    }
+  }
+
+  function shouldSyncCurrentMonthLedger(ledger, todayParts) {
+    const monthKey = getMonthKey(todayParts);
+    if (!monthKey) return false;
+    const sync = ledger?.monthSync?.[monthKey];
+    return !!(sync?.dayKey !== partsToDayKey(todayParts));
+  }
+
+  async function syncCurrentMonthLedgerIfNeeded({ force = false } = {}) {
+    if (!isDailyIncomeEnabled()) return;
+    if (monthLedgerSyncInFlight) return;
+    if (!force && Date.now() < monthLedgerSyncRetryAt) return;
+
+    const today = getTodayParts(TODAY_TIME_ZONE);
+    const monthKey = getMonthKey(today);
+    const todayKey = partsToDayKey(today);
+    const start = getMonthStartParts(today);
+    const ledger = loadLedger();
+    if (!force && !shouldSyncCurrentMonthLedger(ledger, today)) return;
+
+    monthLedgerSyncInFlight = true;
+    try {
+      const discovery = loadDiscovery() || {};
+      let items = [];
+      let reviewReady = false;
+      let questionReady = false;
+      let reviewSource = '';
+      let questionSource = '';
+
+      const reviewUrls = pickDiscoveredApiUrls(discovery, 'review', { max: 1, includeWeak: false });
+      if (!reviewUrls.length) reviewUrls.push(getDefaultReviewCompletedUrl());
+      const uniqueReviewUrls = Array.from(new Set(reviewUrls.map((u) => String(u || '').trim()).filter(Boolean)));
+      for (const url of uniqueReviewUrls) {
+        try {
+          const paged = await fetchItemsForRangePaginated({
+            url,
+            type: 'review',
+            startDayParts: start,
+            endDayParts: today,
+          });
+          items = items.concat(paged.items || []);
+          reviewReady = true;
+          reviewSource = 'review-api';
+          break;
+        } catch (_) {
+          // Try the next candidate URL.
+        }
+      }
+
+      try {
+        const paged = await fetchGraphqlItemsForRangePaginated({
+          request: getQuestionHistoryRequest(discovery),
+          fallbackType: 'question',
+          startDayParts: start,
+          endDayParts: today,
+        });
+        items = items.concat(paged.items || []);
+        questionReady = true;
+        questionSource = 'question-graphql';
+      } catch (_) {
+        const questionUrls = pickDiscoveredApiUrls(discovery, 'question', { max: 1, includeWeak: false });
+        for (const url of questionUrls) {
+          try {
+            const paged = await fetchItemsForRangePaginated({
+              url,
+              type: 'question',
+              startDayParts: start,
+              endDayParts: today,
+            });
+            items = items.concat(paged.items || []);
+            questionReady = true;
+            questionSource = 'question-api';
+            break;
+          } catch (_) {
+            // Keep trying fallbacks.
+          }
+        }
+      }
+
+      if (!reviewReady && !questionReady) throw new Error('No month sources responded');
+
+      const deduped = dedupeItemsAcrossSources(items);
+      const totalsByDay = computeTotalsByDayFromItems(deduped, start, today);
+      const nextLedger = loadLedger();
+      for (const dayKey of buildDayKeysInRange(start, today)) {
+        const prev = nextLedger.byDay?.[dayKey] || null;
+        const dayTotals = totalsByDay[dayKey] || {};
+        if ((!reviewReady || !questionReady) && !prev) continue;
+        const payload = {
+          reviews: reviewReady ? Number(dayTotals.reviews || 0) : Number(prev?.reviews || 0),
+          questions: questionReady ? Number(dayTotals.questions || 0) : Number(prev?.questions || 0),
+          countedReviews: reviewReady ? Number(dayTotals.countedReviews || 0) : Number(prev?.countedReviews || 0),
+          countedQuestions: questionReady ? Number(dayTotals.countedQuestions || 0) : Number(prev?.countedQuestions || 0),
+        };
+        upsertLedgerEntryIn(nextLedger, dayKey, payload, {
+          source: 'month-sync',
+          closed: compareYMD(parseDayKeyToParts(dayKey), today) < 0,
+          updatedAt: Date.now(),
+        });
+      }
+      nextLedger.monthSync = (nextLedger.monthSync && typeof nextLedger.monthSync === 'object') ? nextLedger.monthSync : {};
+      nextLedger.monthSync[monthKey] = {
+        at: Date.now(),
+        dayKey: (reviewReady && questionReady) ? todayKey : '',
+        source: [reviewSource, questionSource].filter(Boolean).join('+'),
+      };
+      saveLedger(nextLedger);
+      monthLedgerSyncRetryAt = 0;
+    } catch (_) {
+      monthLedgerSyncRetryAt = Date.now() + MONTH_SYNC_RETRY_MS;
+    } finally {
+      monthLedgerSyncInFlight = false;
+    }
   }
 
   async function recomputeAndRender({ force = false } = {}) {
@@ -2804,6 +3324,7 @@
 	            : `Paged History: R ${rp}p, Q ${qp}p.`;
 	          lastApiFailure = '';
 	          saveDayCache(dayKey, payloadOut);
+	          recordLedgerEntry(dayKey, payloadOut, usedApiFallback ? 'api' : 'history');
 	          render({ reviews: reviewsOut, questions: questionsOut, note: '' });
 	          return;
 	        }
@@ -2935,6 +3456,7 @@
           if (apiCounts === 0 && cacheCounts > 0 && !isHistoryRoute() && !force) {
             lastStatus = 'ready';
             lastDataSource = 'cache';
+            recordLedgerEntry(dayKey, dayCache, 'cache');
             render({
               reviews: { sum: dayCache.reviews || 0, found: true, rowsCounted: dayCache.countedReviews || 0, rowsSeen: dayCache.countedReviews || 0 },
               questions: { sum: dayCache.questions || 0, found: true, rowsCounted: dayCache.countedQuestions || 0, rowsSeen: dayCache.countedQuestions || 0 },
@@ -2948,6 +3470,7 @@
             saveDayCache(dayKey, mergedTotals);
           }
           saveBestLock(dayKey, mergedTotals);
+          recordLedgerEntry(dayKey, mergedTotals, 'api');
           render({
             reviews: { sum: mergedTotals.reviews, found: true, rowsCounted: mergedTotals.countedReviews, rowsSeen: mergedTotals.countedReviews },
             questions: { sum: mergedTotals.questions, found: true, rowsCounted: mergedTotals.countedQuestions, rowsSeen: mergedTotals.countedQuestions },
@@ -2971,6 +3494,7 @@
         lastBackgroundError = '';
         lastPagingInfo = '';
         lastApiFailure = '';
+        recordLedgerEntry(dayKey, dayCache, 'cache');
         render({
           reviews: { sum: dayCache.reviews || 0, found: true, rowsCounted: dayCache.countedReviews || 0, rowsSeen: dayCache.countedReviews || 0 },
           questions: { sum: dayCache.questions || 0, found: true, rowsCounted: dayCache.countedQuestions || 0, rowsSeen: dayCache.countedQuestions || 0 },
@@ -3000,6 +3524,7 @@
           lastDataSource = 'cache';
           lastBackgroundError = '';
           lastPagingInfo = '';
+          recordLedgerEntry(dayKey, dayCache, 'cache');
           render({
             reviews: { sum: dayCache.reviews || 0, found: true, rowsCounted: dayCache.countedReviews || 0, rowsSeen: dayCache.countedReviews || 0 },
             questions: { sum: dayCache.questions || 0, found: true, rowsCounted: dayCache.countedQuestions || 0, rowsSeen: dayCache.countedQuestions || 0 },
@@ -3035,6 +3560,7 @@
         lastDataSource = 'cache';
         lastBackgroundError = 'History parse failed; showing cached totals.';
         lastPagingInfo = '';
+        recordLedgerEntry(dayKey, dayCache, 'cache');
         render({
           reviews: { sum: dayCache.reviews || 0, found: true, rowsCounted: dayCache.countedReviews || 0, rowsSeen: dayCache.countedReviews || 0 },
           questions: { sum: dayCache.questions || 0, found: true, rowsCounted: dayCache.countedQuestions || 0, rowsSeen: dayCache.countedQuestions || 0 },
@@ -3061,6 +3587,7 @@
         saveBestLock(dayKey, nextDay);
         // Never regress the displayed total beneath the best cached value for this day.
         if (dayCache && !shouldOverwriteDayCache(dayCache, nextDay)) {
+          recordLedgerEntry(dayKey, dayCache, 'cache');
           render({
             reviews: { sum: dayCache.reviews || 0, found: true, rowsCounted: dayCache.countedReviews || 0, rowsSeen: dayCache.countedReviews || 0 },
             questions: { sum: dayCache.questions || 0, found: true, rowsCounted: dayCache.countedQuestions || 0, rowsSeen: dayCache.countedQuestions || 0 },
@@ -3072,6 +3599,7 @@
         if (rp > 1 || shouldOverwriteDayCache(dayCache, nextDay)) {
           saveDayCache(dayKey, nextDay);
         }
+        recordLedgerEntry(dayKey, nextDay, 'history');
       }
       render({ reviews, questions, note: '' });
     } finally {
@@ -3120,10 +3648,12 @@
     if (!applyDailyIncomeEnabledState()) return;
 
     uiBooted = true;
+    seedLedgerFromExistingCaches();
     ensureBar();
 
     // Fire-and-forget initial compute (async safe).
     recomputeAndRender({ force: isHistoryRoute() }).catch(() => {});
+    syncCurrentMonthLedgerIfNeeded().catch(() => {});
 
     if (!bodyObserverInstalled) {
       bodyObserverInstalled = true;
@@ -3172,14 +3702,19 @@
         if (!isDailyIncomeEnabled()) return;
         // BFCache restores frequently skip normal startup observers; force an immediate recompute.
         scheduleRecompute(!!event?.persisted, 'lifecycle');
+        syncCurrentMonthLedgerIfNeeded().catch(() => {});
       });
       window.addEventListener('focus', () => {
         if (!isDailyIncomeEnabled()) return;
         scheduleRecompute(true, 'lifecycle');
+        syncCurrentMonthLedgerIfNeeded().catch(() => {});
       });
       document.addEventListener('visibilitychange', () => {
         if (!isDailyIncomeEnabled()) return;
-        if (document.visibilityState === 'visible') scheduleRecompute(true, 'lifecycle');
+        if (document.visibilityState === 'visible') {
+          scheduleRecompute(true, 'lifecycle');
+          syncCurrentMonthLedgerIfNeeded().catch(() => {});
+        }
       });
     }
   }
@@ -3188,8 +3723,10 @@
     const enabled = applyDailyIncomeEnabledState();
     if (enabled) {
       installNetworkDiscoveryHooks();
+      seedLedgerFromExistingCaches();
       bootUiIfReady();
       scheduleRecompute(true);
+      syncCurrentMonthLedgerIfNeeded({ force: true }).catch(() => {});
     }
   }
 
