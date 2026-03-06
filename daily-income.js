@@ -33,6 +33,7 @@
   const LEDGER_SCHEMA_VERSION = 1;
   const LEDGER_MAX_DAYS = 400;
   const MONTH_SYNC_RETRY_MS = 15 * 60 * 1000;
+  const MONTH_LEDGER_SYNC_VERSION = 2;
   const DEFAULT_QUESTION_HISTORY_QUERY = 'query MentorDash_FetchHistory($count: Int, $afterCursor: String) { queue { history(first: $count, after: $afterCursor) { edges { cursor node { project { title } createdAt payment { amount currencyCode } type question { id } } } totalCount } } }';
   let recomputeInFlight = false;
   let recomputeQueued = false;
@@ -1181,6 +1182,7 @@
           at: Number(entry.at || 0),
           dayKey: parseDayKeyToParts(entry.dayKey) ? entry.dayKey : '',
           source: typeof entry.source === 'string' ? entry.source : '',
+          version: Number(entry.version || 0),
         };
       }
       return {
@@ -2576,6 +2578,48 @@
     try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return null; }
   }
 
+  function resetGraphqlCursorVars(body) {
+    if (!body || typeof body !== 'object') return body;
+    const b = cloneJson(body) || body;
+    b.variables = (b.variables && typeof b.variables === 'object') ? b.variables : {};
+    const keys = ['after', 'afterCursor', 'after_cursor', 'cursor', 'pageCursor', 'page_cursor', 'endCursor', 'end_cursor', 'starting_after', 'startingAfter'];
+    for (const k of keys) {
+      if (k in b.variables) b.variables[k] = null;
+    }
+    if ('count' in b.variables) {
+      const current = Number(b.variables.count);
+      b.variables.count = Number.isFinite(current) && current > 0 ? Math.max(current, 100) : 100;
+    }
+    if ('first' in b.variables) {
+      const current = Number(b.variables.first);
+      b.variables.first = Number.isFinite(current) && current > 0 ? Math.max(current, 100) : 100;
+    }
+    return b;
+  }
+
+  function looksLikeGraphqlHistoryRequest(request) {
+    const body = request?.body;
+    const query = typeof body?.query === 'string' ? body.query : '';
+    const operationName = String(body?.operationName || '');
+    return /history\s*\(/i.test(query) || /fetchhistory/i.test(operationName);
+  }
+
+  function normalizeGraphqlItemRequest(request, fallbackType) {
+    if (!request || typeof request !== 'object') return request;
+    if (fallbackType === 'question' && !looksLikeGraphqlHistoryRequest(request)) {
+      const def = getDefaultQuestionHistoryRequest();
+      return {
+        ...def,
+        body: resetGraphqlCursorVars(def.body),
+      };
+    }
+    const body = resetGraphqlCursorVars(request.body);
+    return {
+      ...request,
+      body,
+    };
+  }
+
   function updateGraphqlCursorVars(body, endCursor) {
     if (!body || typeof body !== 'object' || !endCursor) return body;
     const b = cloneJson(body) || body;
@@ -2599,8 +2643,9 @@
     const MAX_PAGES = 60;
     const SLEEP_MS = 150;
     const target = targetDayParts || getTargetDayParts();
-    const url = request?.url;
-    const baseBody = request?.body;
+    const normalizedRequest = normalizeGraphqlItemRequest(request, fallbackType);
+    const url = normalizedRequest?.url;
+    const baseBody = normalizedRequest?.body;
     if (!url || !baseBody || typeof baseBody !== 'object') throw new Error('No GraphQL request captured yet');
 
     let body = cloneJson(baseBody) || baseBody;
@@ -2614,7 +2659,7 @@
         cache: 'no-store',
         headers: {
           'content-type': 'application/json',
-          ...(request.headers || {}),
+          ...(normalizedRequest.headers || {}),
         },
         body: JSON.stringify(body),
       });
@@ -2645,8 +2690,9 @@
     const SLEEP_MS = 150;
     const start = startDayParts || getMonthStartParts(getTodayParts(TODAY_TIME_ZONE));
     const end = endDayParts || getTodayParts(TODAY_TIME_ZONE);
-    const url = request?.url;
-    const baseBody = request?.body;
+    const normalizedRequest = normalizeGraphqlItemRequest(request, fallbackType);
+    const url = normalizedRequest?.url;
+    const baseBody = normalizedRequest?.body;
     if (!url || !baseBody || typeof baseBody !== 'object') throw new Error('No GraphQL request captured yet');
 
     let body = cloneJson(baseBody) || baseBody;
@@ -2661,7 +2707,7 @@
         cache: 'no-store',
         headers: {
           'content-type': 'application/json',
-          ...(request.headers || {}),
+          ...(normalizedRequest.headers || {}),
         },
         body: JSON.stringify(body),
       });
@@ -3053,7 +3099,9 @@
     const monthKey = getMonthKey(todayParts);
     if (!monthKey) return false;
     const sync = ledger?.monthSync?.[monthKey];
-    return !!(sync?.dayKey !== partsToDayKey(todayParts));
+    if (!sync || typeof sync !== 'object') return true;
+    if (Number(sync.version || 0) !== MONTH_LEDGER_SYNC_VERSION) return true;
+    return !!(sync.dayKey !== partsToDayKey(todayParts));
   }
 
   async function syncCurrentMonthLedgerIfNeeded({ force = false } = {}) {
@@ -3153,6 +3201,7 @@
         at: Date.now(),
         dayKey: (reviewReady && questionReady) ? todayKey : '',
         source: [reviewSource, questionSource].filter(Boolean).join('+'),
+        version: MONTH_LEDGER_SYNC_VERSION,
       };
       saveLedger(nextLedger);
       monthLedgerSyncRetryAt = 0;

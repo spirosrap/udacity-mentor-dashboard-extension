@@ -52,4 +52,5 @@ This extension combines both scripts into one package and adds a popup UI:
 - Discovery avoids false-positive endpoints (for example `certifications`, `assigned`, and queue-style endpoints) and prioritizes completed/history sources.
 - API pagination now boosts page size (`per_page`) to reduce first-page-only undercount scenarios.
 - Question GraphQL pagination now advances `afterCursor` correctly, so current-month question backfills can span multiple pages.
+- Captured question-history GraphQL requests are normalized back to page 1 before replay, so stored cursors cannot silently skip recent days during ledger backfills.
 - Day cache/lock entries are schema-versioned to avoid stale totals after major logic updates.
