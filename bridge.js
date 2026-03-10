@@ -2,6 +2,7 @@
   "use strict";
 
   const PREFS_KEY = "udacityMentorDashboardUiPrefsV1";
+  const VISIBILITY_SESSION_KEY = "udacityMentorDashboardUiVisibilityV1";
   const STYLE_ID = "udacity-mentor-dashboard-extension-visibility-style";
   const AUTO_REFRESH_ENABLED_KEY = "udacityMentorAutoRefreshEnabled";
   const AUTO_REFRESH_EVENT = "udacity-tools:auto-refresh-enabled";
@@ -11,9 +12,11 @@
   const LEDGER_TIME_ZONE = "Europe/Athens";
   const DEFAULT_PREFS = Object.freeze({
     dailyIncomeEnabled: false,
+    autoRefreshEnabled: true,
+  });
+  const DEFAULT_VISIBILITY = Object.freeze({
     hideIncomeBox: false,
     hideAutoRefreshBox: false,
-    autoRefreshEnabled: true,
   });
 
   function hasOwn(obj, key) {
@@ -25,11 +28,16 @@
       dailyIncomeEnabled: hasOwn(raw, "dailyIncomeEnabled")
         ? raw?.dailyIncomeEnabled !== false
         : DEFAULT_PREFS.dailyIncomeEnabled,
-      hideIncomeBox: !!raw?.hideIncomeBox,
-      hideAutoRefreshBox: !!raw?.hideAutoRefreshBox,
       autoRefreshEnabled: hasOwn(raw, "autoRefreshEnabled")
         ? raw?.autoRefreshEnabled !== false
         : DEFAULT_PREFS.autoRefreshEnabled,
+    };
+  }
+
+  function normalizeVisibility(raw) {
+    return {
+      hideIncomeBox: !!raw?.hideIncomeBox,
+      hideAutoRefreshBox: !!raw?.hideAutoRefreshBox,
     };
   }
 
@@ -66,6 +74,26 @@
     });
   }
 
+  function getVisibility() {
+    try {
+      const raw = window.sessionStorage.getItem(VISIBILITY_SESSION_KEY);
+      if (!raw) return { ...DEFAULT_VISIBILITY };
+      return { ...DEFAULT_VISIBILITY, ...normalizeVisibility(JSON.parse(raw)) };
+    } catch (_) {
+      return { ...DEFAULT_VISIBILITY };
+    }
+  }
+
+  function setVisibility(visibility) {
+    try {
+      const normalized = normalizeVisibility(visibility);
+      window.sessionStorage.setItem(VISIBILITY_SESSION_KEY, JSON.stringify(normalized));
+      return { ok: true, visibility: normalized };
+    } catch (_) {
+      return { ok: false, visibility: { ...DEFAULT_VISIBILITY } };
+    }
+  }
+
   function ensureVisibilityStyle() {
     let style = document.getElementById(STYLE_ID);
     if (style) return style;
@@ -75,13 +103,13 @@
     return style;
   }
 
-  function applyPrefs(prefs) {
+  function applyVisibility(visibility) {
     const style = ensureVisibilityStyle();
     const rules = [];
-    if (prefs.hideIncomeBox) {
+    if (visibility.hideIncomeBox) {
       rules.push("#tm-udacity-daily-income-bar { display: none !important; }");
     }
-    if (prefs.hideAutoRefreshBox) {
+    if (visibility.hideAutoRefreshBox) {
       rules.push("#udacity-mentor-auto-refresh-badge { display: none !important; }");
     }
     style.textContent = rules.join("\n");
@@ -89,7 +117,6 @@
 
   function applyAndSyncPrefs(prefs) {
     const normalized = { ...DEFAULT_PREFS, ...normalizePrefs(prefs) };
-    applyPrefs(normalized);
     syncAutoRefreshEnabled(normalized);
     syncDailyIncomeEnabled(normalized);
     return normalized;
@@ -215,10 +242,13 @@
 
   async function handleGetState(sendResponse) {
     const prefs = await getPrefs();
+    const visibility = getVisibility();
+    applyVisibility(visibility);
     applyAndSyncPrefs(prefs);
     sendResponse({
       ok: true,
       prefs,
+      visibility,
       income: getIncomeState(),
       autoRefresh: getAutoRefreshState(),
       pageUrl: location.href,
@@ -232,10 +262,27 @@
       ...normalizePrefs(message?.prefs || {}),
     };
     const saved = await setPrefs(next);
+    const visibility = getVisibility();
+    applyVisibility(visibility);
     applyAndSyncPrefs(saved.prefs);
     sendResponse({
       ok: saved.ok,
       prefs: saved.prefs,
+      visibility,
+    });
+  }
+
+  function handleSetVisibility(message, sendResponse) {
+    const current = getVisibility();
+    const next = {
+      ...current,
+      ...normalizeVisibility(message?.visibility || {}),
+    };
+    const saved = setVisibility(next);
+    applyVisibility(saved.visibility);
+    sendResponse({
+      ok: saved.ok,
+      visibility: saved.visibility,
     });
   }
 
@@ -257,6 +304,10 @@
       handleSetPrefs(message, sendResponse);
       return true;
     }
+    if (message.type === "udacity-tools:set-visibility") {
+      handleSetVisibility(message, sendResponse);
+      return true;
+    }
     if (message.type === "udacity-tools:get-ledger") {
       handleGetLedger(sendResponse);
       return;
@@ -276,9 +327,11 @@
 
   getPrefs()
     .then((prefs) => {
+      applyVisibility(getVisibility());
       applyAndSyncPrefs(prefs);
     })
     .catch(() => {
+      applyVisibility(getVisibility());
       applyAndSyncPrefs({ ...DEFAULT_PREFS });
     });
 })();

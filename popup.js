@@ -2,6 +2,7 @@
 
 const GET_STATE = "udacity-tools:get-state";
 const SET_PREFS = "udacity-tools:set-prefs";
+const SET_VISIBILITY = "udacity-tools:set-visibility";
 
 const elStatus = document.getElementById("status");
 const elIncomeReviews = document.getElementById("income-reviews");
@@ -61,11 +62,12 @@ function renderFromState(state) {
   const income = state?.income || {};
   const autoRefresh = state?.autoRefresh || {};
   const prefs = state?.prefs || {};
+  const visibility = state?.visibility || {};
 
   elToggleDailyIncomeEnabled.checked = prefs.dailyIncomeEnabled !== false;
   elToggleAutoRefreshEnabled.checked = prefs.autoRefreshEnabled !== false;
-  elToggleIncome.checked = !!prefs.hideIncomeBox;
-  elToggleRefresh.checked = !!prefs.hideAutoRefreshBox;
+  elToggleIncome.checked = !!visibility.hideIncomeBox;
+  elToggleRefresh.checked = !!visibility.hideAutoRefreshBox;
 
   if (income.present) {
     elIncomeReviews.textContent = income.reviews || "-";
@@ -156,6 +158,24 @@ async function savePrefs() {
       prefs: {
         dailyIncomeEnabled: elToggleDailyIncomeEnabled.checked,
         autoRefreshEnabled: elToggleAutoRefreshEnabled.checked,
+      },
+    });
+    await loadState();
+  } catch (_) {
+    setStatus("Failed to update settings.");
+  }
+}
+
+async function saveVisibility() {
+  if (!activeTabId) {
+    await loadState();
+    if (!activeTabId) return;
+  }
+
+  try {
+    await sendMessageToTab(activeTabId, {
+      type: SET_VISIBILITY,
+      visibility: {
         hideIncomeBox: elToggleIncome.checked,
         hideAutoRefreshBox: elToggleRefresh.checked,
       },
@@ -191,11 +211,11 @@ elToggleAutoRefreshEnabled.addEventListener("change", () => {
 });
 
 elToggleIncome.addEventListener("change", () => {
-  savePrefs();
+  saveVisibility();
 });
 
 elToggleRefresh.addEventListener("change", () => {
-  savePrefs();
+  saveVisibility();
 });
 
 elRefreshButton.addEventListener("click", () => {
