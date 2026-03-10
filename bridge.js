@@ -87,6 +87,14 @@
     style.textContent = rules.join("\n");
   }
 
+  function applyAndSyncPrefs(prefs) {
+    const normalized = { ...DEFAULT_PREFS, ...normalizePrefs(prefs) };
+    applyPrefs(normalized);
+    syncAutoRefreshEnabled(normalized);
+    syncDailyIncomeEnabled(normalized);
+    return normalized;
+  }
+
   function syncAutoRefreshEnabled(prefs) {
     const enabled = prefs?.autoRefreshEnabled !== false;
     try {
@@ -207,7 +215,7 @@
 
   async function handleGetState(sendResponse) {
     const prefs = await getPrefs();
-    applyPrefs(prefs);
+    applyAndSyncPrefs(prefs);
     sendResponse({
       ok: true,
       prefs,
@@ -224,9 +232,7 @@
       ...normalizePrefs(message?.prefs || {}),
     };
     const saved = await setPrefs(next);
-    applyPrefs(saved.prefs);
-    syncAutoRefreshEnabled(saved.prefs);
-    syncDailyIncomeEnabled(saved.prefs);
+    applyAndSyncPrefs(saved.prefs);
     sendResponse({
       ok: saved.ok,
       prefs: saved.prefs,
@@ -257,16 +263,22 @@
     }
   });
 
+  try {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== "local") return;
+      if (!changes || !Object.prototype.hasOwnProperty.call(changes, PREFS_KEY)) return;
+      const nextPrefs = changes[PREFS_KEY]?.newValue;
+      applyAndSyncPrefs(nextPrefs);
+    });
+  } catch (_) {
+    // ignore
+  }
+
   getPrefs()
     .then((prefs) => {
-      applyPrefs(prefs);
-      syncAutoRefreshEnabled(prefs);
-      syncDailyIncomeEnabled(prefs);
+      applyAndSyncPrefs(prefs);
     })
     .catch(() => {
-      const fallback = { ...DEFAULT_PREFS };
-      applyPrefs(fallback);
-      syncAutoRefreshEnabled(fallback);
-      syncDailyIncomeEnabled(fallback);
+      applyAndSyncPrefs({ ...DEFAULT_PREFS });
     });
 })();
