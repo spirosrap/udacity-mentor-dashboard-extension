@@ -108,7 +108,15 @@ button:hover {
   margin-bottom: 18px;
 }
 
+.insight-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
 .summary-card,
+.insight-card,
 .table-card {
   border: 1px solid var(--border);
   border-radius: 20px;
@@ -119,6 +127,13 @@ button:hover {
 
 .summary-card {
   padding: 18px 18px 16px;
+}
+
+.insight-card {
+  padding: 16px 18px 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 60%),
+    rgba(17, 25, 37, 0.94);
 }
 
 .summary-label {
@@ -133,6 +148,19 @@ button:hover {
 .summary-value {
   font-size: clamp(22px, 4vw, 30px);
   letter-spacing: -0.03em;
+}
+
+.insight-value {
+  display: block;
+  font-size: clamp(20px, 3vw, 28px);
+  letter-spacing: -0.03em;
+  color: #f7fbff;
+}
+
+.insight-note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .table-card {
@@ -244,6 +272,10 @@ tfoot th:last-child {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .insight-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .sync-meta {
     max-width: none;
     text-align: left;
@@ -256,6 +288,10 @@ tfoot th:last-child {
   }
 
   .summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .insight-grid {
     grid-template-columns: 1fr;
   }
 

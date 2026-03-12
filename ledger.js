@@ -9,6 +9,14 @@ const elSummaryTotal = document.getElementById("summary-total");
 const elSummaryReviews = document.getElementById("summary-reviews");
 const elSummaryQuestions = document.getElementById("summary-questions");
 const elSummaryDays = document.getElementById("summary-days");
+const elStatAverage = document.getElementById("stat-average");
+const elStatAverageNote = document.getElementById("stat-average-note");
+const elStatBestTotal = document.getElementById("stat-best-total");
+const elStatBestTotalNote = document.getElementById("stat-best-total-note");
+const elStatBestReview = document.getElementById("stat-best-review");
+const elStatBestReviewNote = document.getElementById("stat-best-review-note");
+const elStatBestQuestion = document.getElementById("stat-best-question");
+const elStatBestQuestionNote = document.getElementById("stat-best-question-note");
 const elTableSubtitle = document.getElementById("table-subtitle");
 const elSyncMeta = document.getElementById("sync-meta");
 const elLedgerBody = document.getElementById("ledger-body");
@@ -110,6 +118,14 @@ function renderEmpty(message) {
   elSummaryReviews.textContent = "-";
   elSummaryQuestions.textContent = "-";
   elSummaryDays.textContent = "-";
+  elStatAverage.textContent = "-";
+  elStatAverageNote.textContent = "-";
+  elStatBestTotal.textContent = "-";
+  elStatBestTotalNote.textContent = "-";
+  elStatBestReview.textContent = "-";
+  elStatBestReviewNote.textContent = "-";
+  elStatBestQuestion.textContent = "-";
+  elStatBestQuestionNote.textContent = "-";
   elFooterReviews.textContent = "-";
   elFooterQuestions.textContent = "-";
   elFooterTotal.textContent = "-";
@@ -142,6 +158,7 @@ function renderLedger() {
   let totalReviews = 0;
   let totalQuestions = 0;
   let storedDays = 0;
+  const computedRows = [];
   const rows = dayKeys.map((dayKey) => {
     const row = byDay[dayKey] || null;
     const reviews = Number(row?.reviews || 0);
@@ -150,6 +167,7 @@ function renderLedger() {
     if (row) storedDays += 1;
     totalReviews += reviews;
     totalQuestions += questions;
+    computedRows.push({ dayKey, reviews, questions, total, hasRow: !!row });
     return `
       <tr>
         <td>${formatDateLabel(dayKey)}</td>
@@ -162,12 +180,29 @@ function renderLedger() {
 
   const monthTotal = totalReviews + totalQuestions;
   const monthSync = storedLedger?.monthSync?.[selectedMonth] || null;
+  const activeRows = computedRows.filter((row) => row.hasRow);
+  const averageDay = activeRows.length ? (monthTotal / activeRows.length) : 0;
+  const bestTotalDay = computedRows.reduce((best, row) => (!best || row.total > best.total ? row : best), null);
+  const bestReviewDay = computedRows.reduce((best, row) => (!best || row.reviews > best.reviews ? row : best), null);
+  const bestQuestionDay = computedRows.reduce((best, row) => (!best || row.questions > best.questions ? row : best), null);
 
   elLedgerBody.innerHTML = rows.join("");
   elSummaryTotal.textContent = formatMoney(monthTotal);
   elSummaryReviews.textContent = formatMoney(totalReviews);
   elSummaryQuestions.textContent = formatMoney(totalQuestions);
   elSummaryDays.textContent = `${storedDays}/${dayKeys.length}`;
+  elStatAverage.textContent = formatMoney(averageDay);
+  elStatAverageNote.textContent = activeRows.length
+    ? `${activeRows.length} stored day${activeRows.length === 1 ? "" : "s"} in this month`
+    : "No stored days in this month yet";
+  elStatBestTotal.textContent = bestTotalDay ? formatMoney(bestTotalDay.total) : "-";
+  elStatBestTotalNote.textContent = bestTotalDay ? formatDateLabel(bestTotalDay.dayKey) : "-";
+  elStatBestReview.textContent = bestReviewDay ? formatMoney(bestReviewDay.reviews) : "-";
+  elStatBestReviewNote.textContent = bestReviewDay ? formatDateLabel(bestReviewDay.dayKey) : "-";
+  elStatBestQuestion.textContent = bestQuestionDay ? formatMoney(bestQuestionDay.questions) : "-";
+  elStatBestQuestionNote.textContent = bestQuestionDay && bestQuestionDay.questions > 0
+    ? formatDateLabel(bestQuestionDay.dayKey)
+    : "No question income stored";
   elFooterReviews.textContent = formatMoney(totalReviews);
   elFooterQuestions.textContent = formatMoney(totalQuestions);
   elFooterTotal.textContent = formatMoney(monthTotal);
