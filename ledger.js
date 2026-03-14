@@ -38,6 +38,7 @@ function formatDateLabel(dayKey) {
   const dt = new Date(Date.UTC(year, month - 1, day));
   return new Intl.DateTimeFormat("en-US", {
     timeZone: "UTC",
+    weekday: "short",
     month: "short",
     day: "numeric",
     year: "numeric",
