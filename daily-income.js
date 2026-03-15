@@ -32,9 +32,10 @@
   const DAY_TOTALS_SCHEMA_VERSION = 2;
   const LEDGER_SCHEMA_VERSION = 1;
   const LEDGER_MAX_DAYS = 400;
+  const LARGE_PAGE_SIZE = 500;
   const MONTH_SYNC_RETRY_MS = 15 * 60 * 1000;
   const MONTH_LEDGER_SYNC_VERSION = 2;
-  const DEFAULT_QUESTION_HISTORY_QUERY = 'query MentorDash_FetchHistory($count: Int, $afterCursor: String) { queue { history(first: $count, after: $afterCursor) { edges { cursor node { project { title } createdAt payment { amount currencyCode } type question { id } } } totalCount } } }';
+  const DEFAULT_QUESTION_HISTORY_QUERY = 'query MentorDash_FetchHistory($count: Int, $afterCursor: String) { queue { history(first: $count, after: $afterCursor) { edges { cursor node { createdAt payment { amount currencyCode } type question { id } } } totalCount } } }';
   let recomputeInFlight = false;
   let recomputeQueued = false;
   let lastRecomputeFinishedAt = 0;
@@ -190,6 +191,31 @@
     return `${parts.y}-${String(parts.m).padStart(2, '0')}`;
   }
 
+  function sameYearMonth(a, b) {
+    return !!a && !!b && a.y === b.y && a.m === b.m;
+  }
+
+  function shiftMonth(parts, delta) {
+    if (!parts || !Number.isFinite(delta)) return parts || null;
+    const dt = new Date(Date.UTC(parts.y, (parts.m - 1) + delta, 1));
+    return {
+      y: dt.getUTCFullYear(),
+      m: dt.getUTCMonth() + 1,
+      d: 1,
+    };
+  }
+
+  function getMonthEndParts(parts, todayParts) {
+    if (!parts) return null;
+    if (sameYearMonth(parts, todayParts)) return { y: todayParts.y, m: todayParts.m, d: todayParts.d };
+    const dt = new Date(Date.UTC(parts.y, parts.m, 0));
+    return {
+      y: dt.getUTCFullYear(),
+      m: dt.getUTCMonth() + 1,
+      d: dt.getUTCDate(),
+    };
+  }
+
   function buildDayKeysInRange(startParts, endParts, maxDays = LEDGER_MAX_DAYS) {
     if (!startParts || !endParts) return [];
     if (compareYMD(startParts, endParts) > 0) return [];
@@ -330,11 +356,20 @@
       return Number.isNaN(d.getTime()) ? null : d;
     }
     if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+        const num = Number(trimmed);
+        if (Number.isFinite(num)) {
+          const ms = num < 1e12 && num > 1e9 ? num * 1000 : num;
+          const d = new Date(ms);
+          if (!Number.isNaN(d.getTime())) return d;
+        }
+      }
       // ISO-ish timestamps from APIs.
-      const d = new Date(value);
+      const d = new Date(trimmed);
       if (!Number.isNaN(d.getTime())) return d;
       // Fallback for UI-style "January 23, 2026".
-      const mdY = parseMonthDayYear(value);
+      const mdY = parseMonthDayYear(trimmed);
       if (mdY) return new Date(Date.UTC(mdY.y, mdY.m - 1, mdY.d));
     }
     return null;
@@ -637,6 +672,46 @@
     return { sum, found: true, rowsCounted, rowsSeen: rows.length, maxCompleted };
   }
 
+  function computeSectionTotalsByDayIn(doc, { startHeadingText, endHeadingText, rowTerminatorRe, startDayParts, endDayParts, type }) {
+    const start = startDayParts || getMonthStartParts(getTodayParts(TODAY_TIME_ZONE));
+    const end = endDayParts || getTodayParts(TODAY_TIME_ZONE);
+    const rows = getSectionRowsIn(doc, { startHeadingText, endHeadingText, rowTerminatorRe });
+    if (!rows.length) return { found: false, rowsSeen: 0, rowsCounted: 0, byDay: {}, maxCompleted: null, minCompleted: null };
+
+    const byDay = {};
+    let rowsCounted = 0;
+    let maxCompleted = null;
+    let minCompleted = null;
+
+    for (const row of rows) {
+      const earned = parseRowEarnedAmount(row);
+      const completed = row.map(parseMonthDayYear).find((d) => d != null) ?? null;
+      if (earned == null || !completed) continue;
+      if (!maxCompleted || compareYMD(completed, maxCompleted) > 0) maxCompleted = completed;
+      if (!minCompleted || compareYMD(completed, minCompleted) < 0) minCompleted = completed;
+      if (!isWithinDayRange(completed, start, end)) continue;
+      const dayKey = partsToDayKey(completed);
+      if (!byDay[dayKey]) {
+        byDay[dayKey] = {
+          reviews: 0,
+          questions: 0,
+          countedReviews: 0,
+          countedQuestions: 0,
+        };
+      }
+      if (type === 'review') {
+        byDay[dayKey].reviews += earned;
+        byDay[dayKey].countedReviews += 1;
+      } else if (type === 'question') {
+        byDay[dayKey].questions += earned;
+        byDay[dayKey].countedQuestions += 1;
+      }
+      rowsCounted += 1;
+    }
+
+    return { found: true, rowsSeen: rows.length, rowsCounted, byDay, maxCompleted, minCompleted };
+  }
+
   async function computeSectionSumPaginatedIn(doc, { startHeadingText, endHeadingText, rowTerminatorRe }) {
     const targetDay = getTargetDayParts();
     const sectionCfg = { startHeadingText, endHeadingText, rowTerminatorRe };
@@ -682,6 +757,68 @@
     }
 
     return { sum, found: true, rowsCounted, rowsSeen, pages: pages + 1 };
+  }
+
+  async function computeSectionTotalsByDayPaginatedIn(doc, { startHeadingText, endHeadingText, rowTerminatorRe, startDayParts, endDayParts, type }) {
+    const start = startDayParts || getMonthStartParts(getTodayParts(TODAY_TIME_ZONE));
+    const sectionCfg = { startHeadingText, endHeadingText, rowTerminatorRe };
+    const MAX_PAGES = 30;
+    let pages = 0;
+    let rowsSeen = 0;
+    let rowsCounted = 0;
+    const byDay = {};
+
+    await rewindSectionToFirstPage(doc, sectionCfg);
+    await waitForPaginationReady(doc, sectionCfg, 4000);
+    await waitForSectionRows(doc, sectionCfg, rowTerminatorRe, 15000);
+
+    while (pages < MAX_PAGES) {
+      const cur = computeSectionTotalsByDayIn(doc, {
+        startHeadingText,
+        endHeadingText,
+        rowTerminatorRe,
+        startDayParts,
+        endDayParts,
+        type,
+      });
+      if (!cur.found) return cur;
+      rowsSeen += cur.rowsSeen;
+      rowsCounted += cur.rowsCounted;
+      for (const [dayKey, payload] of Object.entries(cur.byDay || {})) {
+        if (!byDay[dayKey]) {
+          byDay[dayKey] = {
+            reviews: 0,
+            questions: 0,
+            countedReviews: 0,
+            countedQuestions: 0,
+          };
+        }
+        byDay[dayKey].reviews += Number(payload.reviews || 0);
+        byDay[dayKey].questions += Number(payload.questions || 0);
+        byDay[dayKey].countedReviews += Number(payload.countedReviews || 0);
+        byDay[dayKey].countedQuestions += Number(payload.countedQuestions || 0);
+      }
+
+      if (cur.minCompleted && compareYMD(cur.minCompleted, start) < 0) break;
+
+      const prevSig = sectionSignature(doc, sectionCfg);
+      const candidates = collectPaginationCandidates(doc, sectionCfg, 'next').slice(0, 6);
+      let advanced = false;
+      for (const next of candidates) {
+        if (!next || isDisabledish(next)) continue;
+        const ok = await clickNextAndWait(doc, sectionCfg, next, prevSig);
+        if (ok) { advanced = true; break; }
+      }
+      if (!advanced) {
+        if (cur.minCompleted && compareYMD(cur.minCompleted, start) >= 0) {
+          throw new Error(`History ${type} paging ended before reaching ${partsToDayKey(start)}`);
+        }
+        break;
+      }
+      pages += 1;
+    }
+
+    return { found: true, rowsSeen, rowsCounted, byDay, pages: pages + 1 };
   }
 
   function isHistoryRoute() {
@@ -896,15 +1033,15 @@
         if (!u.searchParams.has(key)) continue;
         hasPagingKey = true;
         const cur = Number(u.searchParams.get(key));
-        if (!Number.isFinite(cur) || cur < 200) {
-          u.searchParams.set(key, '200');
+        if (!Number.isFinite(cur) || cur < LARGE_PAGE_SIZE) {
+          u.searchParams.set(key, String(LARGE_PAGE_SIZE));
           touched = true;
         }
       }
       const pathLower = u.pathname.toLowerCase();
       const looksCompletedList = pathLower.includes('submissions') || pathLower.includes('completed') || pathLower.includes('history');
       if (!hasPagingKey && looksCompletedList) {
-        u.searchParams.set('per_page', '200');
+        u.searchParams.set('per_page', String(LARGE_PAGE_SIZE));
         touched = true;
       }
       return u.toString();
@@ -2605,14 +2742,27 @@
   }
 
   function normalizeGraphqlItemRequest(request, fallbackType) {
-    if (!request || typeof request !== 'object') return request;
-    if (fallbackType === 'question' && !looksLikeGraphqlHistoryRequest(request)) {
+    if (fallbackType === 'question') {
       const def = getDefaultQuestionHistoryRequest();
+      const req = (request && typeof request === 'object') ? request : {};
+      const vars = (req.body && typeof req.body === 'object' && req.body.variables && typeof req.body.variables === 'object')
+        ? req.body.variables
+        : {};
       return {
-        ...def,
-        body: resetGraphqlCursorVars(def.body),
+        ...req,
+        url: req.url || def.url,
+        headers: (req.headers && typeof req.headers === 'object') ? req.headers : def.headers,
+        body: resetGraphqlCursorVars({
+          operationName: String(req.body?.operationName || def.body.operationName || 'MentorDash_FetchHistory'),
+          variables: {
+            ...def.body.variables,
+            ...vars,
+          },
+          query: def.body.query,
+        }),
       };
     }
+    if (!request || typeof request !== 'object') return request;
     const body = resetGraphqlCursorVars(request.body);
     return {
       ...request,
@@ -2669,6 +2819,9 @@
       const json = await resp.json();
 
       const items = extractItemsFromAny(json, fallbackType);
+      if (Array.isArray(json?.errors) && json.errors.length && !items.length) {
+        throw new Error(`GraphQL errors: ${String(json.errors[0]?.message || 'unknown error')}`);
+      }
       for (const it of items) {
         const parts = getPartsForDate(it.completedDate, TODAY_TIME_ZONE);
         if (sameYMD(parts, target)) matched.push(it);
@@ -2717,6 +2870,9 @@
       const json = await resp.json();
 
       const items = extractItemsFromAny(json, fallbackType);
+      if (Array.isArray(json?.errors) && json.errors.length && !items.length) {
+        throw new Error(`GraphQL errors: ${String(json.errors[0]?.message || 'unknown error')}`);
+      }
       let maxParts = null;
       for (const it of items) {
         const parts = getPartsForDate(it.completedDate, TODAY_TIME_ZONE);
@@ -2739,7 +2895,7 @@
   }
 
   function getDefaultReviewCompletedUrl() {
-    return `${window.location.origin}/api/review/v1/me/submissions/completed.json?page=1&per_page=200`;
+    return `${window.location.origin}/api/review/v1/me/submissions/completed.json?page=1&per_page=${LARGE_PAGE_SIZE}`;
   }
 
   function getDefaultQuestionHistoryRequest() {
@@ -2795,6 +2951,97 @@
       }
     } catch (_) {}
     return null;
+  }
+
+  function repairPaginationUrl(currentUrl, candidateUrl) {
+    if (!candidateUrl) return null;
+    try {
+      const current = new URL(currentUrl, window.location.origin);
+      const candidate = new URL(candidateUrl, current);
+      const currentBase = (current.pathname.split('/').pop() || '').toLowerCase();
+      const candidateBase = (candidate.pathname.split('/').pop() || '').toLowerCase();
+      const hasPagingHint = [
+        'page',
+        'per_page',
+        'offset',
+        'limit',
+        'cursor',
+        'after',
+        'pageCursor',
+        'page_cursor',
+      ].some((key) => candidate.searchParams.has(key));
+
+      if (
+        hasPagingHint &&
+        currentBase &&
+        candidateBase &&
+        currentBase === candidateBase &&
+        (candidate.origin !== current.origin || candidate.pathname !== current.pathname)
+      ) {
+        const repaired = new URL(current.toString());
+        repaired.search = candidate.search;
+        return repaired.toString();
+      }
+
+      return candidate.toString();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function scorePaginationUrl(currentUrl, candidateUrl) {
+    try {
+      const current = new URL(currentUrl, window.location.origin);
+      const candidate = new URL(candidateUrl, current);
+      let score = 0;
+
+      if (candidate.origin === current.origin) score += 10;
+      if (candidate.pathname === current.pathname) score += 10;
+
+      const currentBase = (current.pathname.split('/').pop() || '').toLowerCase();
+      const candidateBase = (candidate.pathname.split('/').pop() || '').toLowerCase();
+      if (currentBase && candidateBase && currentBase === candidateBase) score += 3;
+
+      const currentPage = Number(current.searchParams.get('page'));
+      const candidatePage = Number(candidate.searchParams.get('page'));
+      if (Number.isFinite(currentPage) && Number.isFinite(candidatePage)) {
+        if (candidatePage === currentPage + 1) score += 8;
+        else if (candidatePage > currentPage) score += 4;
+        else score -= 8;
+      }
+
+      const pagingKeys = ['page', 'per_page', 'offset', 'limit', 'cursor', 'after', 'pageCursor', 'page_cursor'];
+      for (const key of pagingKeys) {
+        if (candidate.searchParams.get(key) === current.searchParams.get(key)) score += 0.25;
+      }
+
+      return score;
+    } catch (_) {
+      return Number.NEGATIVE_INFINITY;
+    }
+  }
+
+  function pickNextPaginationUrl(currentUrl, candidates) {
+    const unique = [];
+    const seen = new Set();
+    for (const candidate of candidates) {
+      const repaired = repairPaginationUrl(currentUrl, candidate);
+      if (!repaired || repaired === currentUrl || seen.has(repaired)) continue;
+      seen.add(repaired);
+      unique.push(repaired);
+    }
+    if (!unique.length) return null;
+
+    let best = null;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    for (const candidate of unique) {
+      const score = scorePaginationUrl(currentUrl, candidate);
+      if (score > bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+    return best;
   }
 
   function deriveNextUrlFromQueryPaging(currentUrl, pageIndex, cursorInfo) {
@@ -2939,7 +3186,7 @@
       const candidates = [nextFromHeaders, nextFromPayload, nextFromQuery].filter(Boolean);
       // If the page had target rows but we can't find a next URL, don't pretend we're complete.
       // We'll stop, but the UI will indicate pagination was incomplete.
-      const nextUrl = candidates.find((u) => u && u !== curUrl) || null;
+      const nextUrl = pickNextPaginationUrl(curUrl, candidates);
       if (!nextUrl) {
         stoppedBecauseNoNext = true;
         break;
@@ -2953,7 +3200,7 @@
     return { items: matched, pagesFetched: page + 1, sawTarget, lastPageHadTarget, stoppedBecauseNoNext };
   }
 
-  async function fetchItemsForRangePaginated({ url, type, startDayParts, endDayParts }) {
+  async function fetchItemsForRangePaginated({ url, type, startDayParts, endDayParts, allowSoftFailAfterFirstPage = true }) {
     const MAX_PAGES = 60;
     const SLEEP_MS = 150;
     const start = startDayParts || getMonthStartParts(getTodayParts(TODAY_TIME_ZONE));
@@ -2963,6 +3210,7 @@
     let page = 0;
     const seenUrls = new Set();
     const matched = [];
+    let lastOldestParts = null;
 
     async function fetchJsonPage(pageUrl, allowSoftFail) {
       try {
@@ -2989,26 +3237,39 @@
       if (seenUrls.has(curUrl)) break;
       seenUrls.add(curUrl);
 
-      const pageResp = await fetchJsonPage(curUrl, page > 0);
-      if (!pageResp) break;
+      const pageResp = await fetchJsonPage(curUrl, allowSoftFailAfterFirstPage && page > 0);
+      if (!pageResp) {
+        if (lastOldestParts && compareYMD(lastOldestParts, start) >= 0) {
+          throw new Error(`Paged ${type} range fetch stopped before reaching ${partsToDayKey(start)}`);
+        }
+        break;
+      }
       const { json, nextFromHeaders } = pageResp;
       const items = extractItemsFromAny(json, type);
       if (!items.length) break;
 
       let maxParts = null;
+      let minParts = null;
       for (const it of items) {
         const parts = getPartsForDate(it.completedDate, TODAY_TIME_ZONE);
         if (!maxParts || compareYMD(parts, maxParts) > 0) maxParts = parts;
+        if (!minParts || compareYMD(parts, minParts) < 0) minParts = parts;
         if (isWithinDayRange(parts, start, end)) matched.push(it);
       }
+      lastOldestParts = minParts || lastOldestParts;
 
       if (maxParts && compareYMD(maxParts, start) < 0) break;
 
       const cursorInfo = findCursorPageInfo(json);
       const nextFromPayload = findNextUrlInPayload(json, curUrl);
       const nextFromQuery = deriveNextUrlFromQueryPaging(curUrl, page, cursorInfo);
-      const nextUrl = [nextFromHeaders, nextFromPayload, nextFromQuery].find((u) => u && u !== curUrl) || null;
-      if (!nextUrl) break;
+      const nextUrl = pickNextPaginationUrl(curUrl, [nextFromHeaders, nextFromPayload, nextFromQuery]);
+      if (!nextUrl) {
+        if (minParts && compareYMD(minParts, start) >= 0) {
+          throw new Error(`Paged ${type} range fetch ended before reaching ${partsToDayKey(start)}`);
+        }
+        break;
+      }
 
       curUrl = withLargePageSize(nextUrl);
       page += 1;
@@ -3095,13 +3356,160 @@
     }
   }
 
-  function shouldSyncCurrentMonthLedger(ledger, todayParts) {
-    const monthKey = getMonthKey(todayParts);
+  function shouldSyncLedgerMonth(ledger, monthParts, endParts) {
+    const monthKey = getMonthKey(monthParts);
     if (!monthKey) return false;
     const sync = ledger?.monthSync?.[monthKey];
     if (!sync || typeof sync !== 'object') return true;
     if (Number(sync.version || 0) !== MONTH_LEDGER_SYNC_VERSION) return true;
-    return !!(sync.dayKey !== partsToDayKey(todayParts));
+    return !!(sync.dayKey !== partsToDayKey(endParts));
+  }
+
+  async function syncLedgerMonthIfNeeded({ monthParts, todayParts, force = false } = {}) {
+    if (!monthParts || !todayParts) return;
+    const monthKey = getMonthKey(monthParts);
+    const monthEnd = getMonthEndParts(monthParts, todayParts);
+    const monthEndKey = partsToDayKey(monthEnd);
+    const start = getMonthStartParts(monthParts);
+    const ledger = loadLedger();
+    if (!force && !shouldSyncLedgerMonth(ledger, monthParts, monthEnd)) return;
+
+    const discovery = loadDiscovery() || {};
+    let items = [];
+    let reviewReady = false;
+    let questionReady = false;
+    let reviewSource = '';
+    let questionSource = '';
+
+    const reviewUrls = pickDiscoveredApiUrls(discovery, 'review', { max: 1, includeWeak: false });
+    if (!reviewUrls.length) reviewUrls.push(getDefaultReviewCompletedUrl());
+    const uniqueReviewUrls = Array.from(new Set(reviewUrls.map((u) => String(u || '').trim()).filter(Boolean)));
+    for (const url of uniqueReviewUrls) {
+      try {
+        const paged = await fetchItemsForRangePaginated({
+          url,
+          type: 'review',
+          startDayParts: start,
+          endDayParts: monthEnd,
+          allowSoftFailAfterFirstPage: false,
+        });
+        items = items.concat(paged.items || []);
+        reviewReady = true;
+        reviewSource = 'review-api';
+        break;
+      } catch (_) {
+        // Try the next candidate URL.
+      }
+    }
+
+    try {
+      const paged = await fetchGraphqlItemsForRangePaginated({
+        request: getQuestionHistoryRequest(discovery),
+        fallbackType: 'question',
+        startDayParts: start,
+        endDayParts: monthEnd,
+      });
+      items = items.concat(paged.items || []);
+      questionReady = true;
+      questionSource = 'question-graphql';
+    } catch (_) {
+      const questionUrls = pickDiscoveredApiUrls(discovery, 'question', { max: 1, includeWeak: false });
+      for (const url of questionUrls) {
+        try {
+          const paged = await fetchItemsForRangePaginated({
+            url,
+            type: 'question',
+            startDayParts: start,
+            endDayParts: monthEnd,
+          });
+          items = items.concat(paged.items || []);
+          questionReady = true;
+          questionSource = 'question-api';
+          break;
+        } catch (_) {
+          // Keep trying fallbacks.
+        }
+      }
+    }
+
+    const deduped = dedupeItemsAcrossSources(items);
+    const totalsByDay = computeTotalsByDayFromItems(deduped, start, monthEnd);
+
+    if (!reviewReady || !questionReady) {
+      const historyDocForMonth = historyDoc || await waitForHistoryDoc(45000);
+      if (historyDocForMonth) {
+        historyDoc = historyDocForMonth;
+        historyDocPromise = null;
+
+        if (!reviewReady) {
+          const reviewHistory = await computeSectionTotalsByDayPaginatedIn(historyDocForMonth, {
+            startHeadingText: 'Reviews History',
+            endHeadingText: 'Question History',
+            rowTerminatorRe: /^View review$/i,
+            startDayParts: start,
+            endDayParts: monthEnd,
+            type: 'review',
+          });
+          if (reviewHistory?.found) {
+            for (const [dayKey, payload] of Object.entries(reviewHistory.byDay || {})) {
+              if (!totalsByDay[dayKey]) totalsByDay[dayKey] = { reviews: 0, questions: 0, countedReviews: 0, countedQuestions: 0 };
+              totalsByDay[dayKey].reviews = Number(payload.reviews || 0);
+              totalsByDay[dayKey].countedReviews = Number(payload.countedReviews || 0);
+            }
+            reviewReady = true;
+            reviewSource = 'review-history';
+          }
+        }
+
+        if (!questionReady) {
+          const questionHistory = await computeSectionTotalsByDayPaginatedIn(historyDocForMonth, {
+            startHeadingText: 'Question History',
+            endHeadingText: null,
+            rowTerminatorRe: /^View question$/i,
+            startDayParts: start,
+            endDayParts: monthEnd,
+            type: 'question',
+          });
+          if (questionHistory?.found) {
+            for (const [dayKey, payload] of Object.entries(questionHistory.byDay || {})) {
+              if (!totalsByDay[dayKey]) totalsByDay[dayKey] = { reviews: 0, questions: 0, countedReviews: 0, countedQuestions: 0 };
+              totalsByDay[dayKey].questions = Number(payload.questions || 0);
+              totalsByDay[dayKey].countedQuestions = Number(payload.countedQuestions || 0);
+            }
+            questionReady = true;
+            questionSource = 'question-history';
+          }
+        }
+      }
+    }
+
+    if (!reviewReady && !questionReady) throw new Error('No month sources responded');
+
+    const nextLedger = loadLedger();
+    for (const dayKey of buildDayKeysInRange(start, monthEnd)) {
+      const prev = nextLedger.byDay?.[dayKey] || null;
+      const dayTotals = totalsByDay[dayKey] || {};
+      if ((!reviewReady || !questionReady) && !prev) continue;
+      const payload = {
+        reviews: reviewReady ? Number(dayTotals.reviews || 0) : Number(prev?.reviews || 0),
+        questions: questionReady ? Number(dayTotals.questions || 0) : Number(prev?.questions || 0),
+        countedReviews: reviewReady ? Number(dayTotals.countedReviews || 0) : Number(prev?.countedReviews || 0),
+        countedQuestions: questionReady ? Number(dayTotals.countedQuestions || 0) : Number(prev?.countedQuestions || 0),
+      };
+      upsertLedgerEntryIn(nextLedger, dayKey, payload, {
+        source: 'month-sync',
+        closed: compareYMD(parseDayKeyToParts(dayKey), todayParts) < 0,
+        updatedAt: Date.now(),
+      });
+    }
+    nextLedger.monthSync = (nextLedger.monthSync && typeof nextLedger.monthSync === 'object') ? nextLedger.monthSync : {};
+    nextLedger.monthSync[monthKey] = {
+      at: Date.now(),
+      dayKey: (reviewReady && questionReady) ? monthEndKey : '',
+      source: [reviewSource, questionSource].filter(Boolean).join('+'),
+      version: MONTH_LEDGER_SYNC_VERSION,
+    };
+    saveLedger(nextLedger);
   }
 
   async function syncCurrentMonthLedgerIfNeeded({ force = false } = {}) {
@@ -3110,100 +3518,13 @@
     if (!force && Date.now() < monthLedgerSyncRetryAt) return;
 
     const today = getTodayParts(TODAY_TIME_ZONE);
-    const monthKey = getMonthKey(today);
-    const todayKey = partsToDayKey(today);
-    const start = getMonthStartParts(today);
-    const ledger = loadLedger();
-    if (!force && !shouldSyncCurrentMonthLedger(ledger, today)) return;
+    const currentMonth = getMonthStartParts(today);
+    const previousMonth = shiftMonth(currentMonth, -1);
 
     monthLedgerSyncInFlight = true;
     try {
-      const discovery = loadDiscovery() || {};
-      let items = [];
-      let reviewReady = false;
-      let questionReady = false;
-      let reviewSource = '';
-      let questionSource = '';
-
-      const reviewUrls = pickDiscoveredApiUrls(discovery, 'review', { max: 1, includeWeak: false });
-      if (!reviewUrls.length) reviewUrls.push(getDefaultReviewCompletedUrl());
-      const uniqueReviewUrls = Array.from(new Set(reviewUrls.map((u) => String(u || '').trim()).filter(Boolean)));
-      for (const url of uniqueReviewUrls) {
-        try {
-          const paged = await fetchItemsForRangePaginated({
-            url,
-            type: 'review',
-            startDayParts: start,
-            endDayParts: today,
-          });
-          items = items.concat(paged.items || []);
-          reviewReady = true;
-          reviewSource = 'review-api';
-          break;
-        } catch (_) {
-          // Try the next candidate URL.
-        }
-      }
-
-      try {
-        const paged = await fetchGraphqlItemsForRangePaginated({
-          request: getQuestionHistoryRequest(discovery),
-          fallbackType: 'question',
-          startDayParts: start,
-          endDayParts: today,
-        });
-        items = items.concat(paged.items || []);
-        questionReady = true;
-        questionSource = 'question-graphql';
-      } catch (_) {
-        const questionUrls = pickDiscoveredApiUrls(discovery, 'question', { max: 1, includeWeak: false });
-        for (const url of questionUrls) {
-          try {
-            const paged = await fetchItemsForRangePaginated({
-              url,
-              type: 'question',
-              startDayParts: start,
-              endDayParts: today,
-            });
-            items = items.concat(paged.items || []);
-            questionReady = true;
-            questionSource = 'question-api';
-            break;
-          } catch (_) {
-            // Keep trying fallbacks.
-          }
-        }
-      }
-
-      if (!reviewReady && !questionReady) throw new Error('No month sources responded');
-
-      const deduped = dedupeItemsAcrossSources(items);
-      const totalsByDay = computeTotalsByDayFromItems(deduped, start, today);
-      const nextLedger = loadLedger();
-      for (const dayKey of buildDayKeysInRange(start, today)) {
-        const prev = nextLedger.byDay?.[dayKey] || null;
-        const dayTotals = totalsByDay[dayKey] || {};
-        if ((!reviewReady || !questionReady) && !prev) continue;
-        const payload = {
-          reviews: reviewReady ? Number(dayTotals.reviews || 0) : Number(prev?.reviews || 0),
-          questions: questionReady ? Number(dayTotals.questions || 0) : Number(prev?.questions || 0),
-          countedReviews: reviewReady ? Number(dayTotals.countedReviews || 0) : Number(prev?.countedReviews || 0),
-          countedQuestions: questionReady ? Number(dayTotals.countedQuestions || 0) : Number(prev?.countedQuestions || 0),
-        };
-        upsertLedgerEntryIn(nextLedger, dayKey, payload, {
-          source: 'month-sync',
-          closed: compareYMD(parseDayKeyToParts(dayKey), today) < 0,
-          updatedAt: Date.now(),
-        });
-      }
-      nextLedger.monthSync = (nextLedger.monthSync && typeof nextLedger.monthSync === 'object') ? nextLedger.monthSync : {};
-      nextLedger.monthSync[monthKey] = {
-        at: Date.now(),
-        dayKey: (reviewReady && questionReady) ? todayKey : '',
-        source: [reviewSource, questionSource].filter(Boolean).join('+'),
-        version: MONTH_LEDGER_SYNC_VERSION,
-      };
-      saveLedger(nextLedger);
+      await syncLedgerMonthIfNeeded({ monthParts: currentMonth, todayParts: today, force });
+      await syncLedgerMonthIfNeeded({ monthParts: previousMonth, todayParts: today, force });
       monthLedgerSyncRetryAt = 0;
     } catch (_) {
       monthLedgerSyncRetryAt = Date.now() + MONTH_SYNC_RETRY_MS;
