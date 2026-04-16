@@ -52,6 +52,10 @@ h2 {
   word-break: break-word;
 }
 
+#tools-mode-text {
+  margin-top: 6px;
+}
+
 .debug-wrap {
   margin-top: 8px;
 }

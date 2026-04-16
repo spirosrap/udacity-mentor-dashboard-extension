@@ -5,6 +5,8 @@ const SET_PREFS = "udacity-tools:set-prefs";
 const SET_VISIBILITY = "udacity-tools:set-visibility";
 
 const elStatus = document.getElementById("status");
+const elToggleToolsActive = document.getElementById("toggle-tools-active");
+const elToolsModeText = document.getElementById("tools-mode-text");
 const elIncomeReviews = document.getElementById("income-reviews");
 const elIncomeQuestions = document.getElementById("income-questions");
 const elIncomeTotal = document.getElementById("income-total");
@@ -58,12 +60,34 @@ function setAutoRefreshUnavailable() {
   elAutoRefreshText.textContent = "Auto Refresh box not detected on this tab.";
 }
 
+function renderToolsMode(prefs, visibility) {
+  const allEnabled = prefs.dailyIncomeEnabled !== false && prefs.autoRefreshEnabled !== false;
+  const allHidden = !!visibility.hideIncomeBox && !!visibility.hideAutoRefreshBox;
+  const allVisible = !visibility.hideIncomeBox && !visibility.hideAutoRefreshBox;
+  const toolsActive = allEnabled && allVisible;
+  const toolsPaused = !allEnabled && allHidden;
+
+  elToggleToolsActive.checked = toolsActive;
+  elToggleToolsActive.indeterminate = !toolsActive && !toolsPaused;
+
+  if (toolsActive) {
+    elToolsModeText.textContent = "Both tools are enabled and visible.";
+    return;
+  }
+  if (toolsPaused) {
+    elToolsModeText.textContent = "Both tools are disabled and hidden on this tab.";
+    return;
+  }
+  elToolsModeText.textContent = "Mixed state. This toggle will normalize both tools together.";
+}
+
 function renderFromState(state) {
   const income = state?.income || {};
   const autoRefresh = state?.autoRefresh || {};
   const prefs = state?.prefs || {};
   const visibility = state?.visibility || {};
 
+  renderToolsMode(prefs, visibility);
   elToggleDailyIncomeEnabled.checked = prefs.dailyIncomeEnabled !== false;
   elToggleAutoRefreshEnabled.checked = prefs.autoRefreshEnabled !== false;
   elToggleIncome.checked = !!visibility.hideIncomeBox;
@@ -186,6 +210,33 @@ async function saveVisibility() {
   }
 }
 
+async function saveToolMode() {
+  if (!activeTabId) {
+    await loadState();
+    if (!activeTabId) return;
+  }
+
+  try {
+    await sendMessageToTab(activeTabId, {
+      type: SET_PREFS,
+      prefs: {
+        dailyIncomeEnabled: elToggleToolsActive.checked,
+        autoRefreshEnabled: elToggleToolsActive.checked,
+      },
+    });
+    await sendMessageToTab(activeTabId, {
+      type: SET_VISIBILITY,
+      visibility: {
+        hideIncomeBox: !elToggleToolsActive.checked,
+        hideAutoRefreshBox: !elToggleToolsActive.checked,
+      },
+    });
+    await loadState();
+  } catch (_) {
+    setStatus("Failed to update combined tool toggle.");
+  }
+}
+
 async function openLedgerPage() {
   try {
     if (!activeTabId) {
@@ -201,6 +252,10 @@ async function openLedgerPage() {
     setStatus("Could not open ledger page.");
   }
 }
+
+elToggleToolsActive.addEventListener("change", () => {
+  saveToolMode();
+});
 
 elToggleDailyIncomeEnabled.addEventListener("change", () => {
   savePrefs();
