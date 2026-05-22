@@ -19,6 +19,7 @@
   const IFRAME_ID = 'tm-udacity-history-iframe';
   const DETAILS_KEY = 'tmUdacityDailyIncomeDetailsOpen';
   const TARGET_DAY_KEY = 'tmUdacityDailyIncomeTargetDay'; // "YYYY-MM-DD" in TODAY_TIME_ZONE terms
+  const TARGET_DAY_SET_ON_KEY = 'tmUdacityDailyIncomeTargetDaySetOn'; // local day when the target date was chosen
   const DAILY_INCOME_ENABLED_KEY = 'udacityMentorDailyIncomeEnabled';
   const DAILY_INCOME_EVENT = 'udacity-tools:daily-income-enabled';
   let lastBackgroundError = '';
@@ -29,13 +30,17 @@
   const CACHE_KEY = 'tmUdacityDailyIncomeCache';
   const BEST_LOCK_KEY = 'tmUdacityDailyIncomeBestByDay';
   const LEDGER_KEY = 'tmUdacityDailyIncomeLedger';
+  const ACTIVE_TAB_LEASE_KEY = 'tmUdacityDailyIncomeActiveTabLease';
   const DAY_TOTALS_SCHEMA_VERSION = 2;
   const LEDGER_SCHEMA_VERSION = 1;
   const LEDGER_MAX_DAYS = 400;
   const LARGE_PAGE_SIZE = 500;
   const MONTH_SYNC_RETRY_MS = 15 * 60 * 1000;
   const MONTH_LEDGER_SYNC_VERSION = 2;
+  const ACTIVE_TAB_LEASE_MS = 20 * 1000;
+  const ACTIVE_TAB_LEASE_HEARTBEAT_MS = 5 * 1000;
   const DEFAULT_QUESTION_HISTORY_QUERY = 'query MentorDash_FetchHistory($count: Int, $afterCursor: String) { queue { history(first: $count, after: $afterCursor) { edges { cursor node { createdAt payment { amount currencyCode } type question { id } } } totalCount } } }';
+  const TAB_INSTANCE_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   let recomputeInFlight = false;
   let recomputeQueued = false;
   let lastRecomputeFinishedAt = 0;
@@ -59,6 +64,8 @@
   let anchorScanCacheEl = null;
   let monthLedgerSyncInFlight = false;
   let monthLedgerSyncRetryAt = 0;
+  let activeTabLeaseHeartbeat = null;
+  let activeTabLeader = false;
 
   const MONTHS = Object.freeze({
     january: 1,
@@ -234,19 +241,136 @@
   }
 
   function getTargetDayParts() {
+    const today = getTodayParts(TODAY_TIME_ZONE);
+    const todayKey = partsToDayKey(today);
     try {
       const raw = localStorage.getItem(TARGET_DAY_KEY);
       const parsed = parseDayKeyToParts(raw);
-      if (parsed) return parsed;
+      if (parsed) {
+        const parsedKey = partsToDayKey(parsed);
+        const setOnKey = localStorage.getItem(TARGET_DAY_SET_ON_KEY);
+        if (parsedKey !== todayKey && setOnKey !== todayKey) {
+          localStorage.setItem(TARGET_DAY_KEY, todayKey);
+          return today;
+        }
+        return parsed;
+      }
     } catch (_) {}
-    return getTodayParts(TODAY_TIME_ZONE);
+    return today;
   }
 
   function setTargetDayParts(parts) {
     try {
       const key = partsToDayKey(parts);
-      if (key) localStorage.setItem(TARGET_DAY_KEY, key);
+      if (key) {
+        localStorage.setItem(TARGET_DAY_KEY, key);
+        localStorage.setItem(TARGET_DAY_SET_ON_KEY, partsToDayKey(getTodayParts(TODAY_TIME_ZONE)));
+      }
     } catch (_) {}
+  }
+
+  function loadActiveTabLease() {
+    try {
+      const raw = localStorage.getItem(ACTIVE_TAB_LEASE_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (!parsed || typeof parsed !== 'object') return null;
+      const ownerId = String(parsed.ownerId || '').trim();
+      const expiresAt = Number(parsed.expiresAt || 0);
+      if (!ownerId || !Number.isFinite(expiresAt) || expiresAt <= 0) return null;
+      return {
+        ownerId,
+        expiresAt,
+        claimedAt: Number(parsed.claimedAt || 0),
+        pageUrl: String(parsed.pageUrl || ''),
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function shouldPreferActiveTabLeadership() {
+    try {
+      if (document.visibilityState !== 'visible') return false;
+      if (typeof document.hasFocus === 'function') return document.hasFocus();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function isActiveTabLeaseFresh(lease) {
+    return !!lease && Number.isFinite(Number(lease.expiresAt || 0)) && Number(lease.expiresAt || 0) > Date.now();
+  }
+
+  function isActiveTabLeader() {
+    const lease = loadActiveTabLease();
+    activeTabLeader = !!(lease && lease.ownerId === TAB_INSTANCE_ID && isActiveTabLeaseFresh(lease));
+    return activeTabLeader;
+  }
+
+  function writeActiveTabLease() {
+    const now = Date.now();
+    safeSetLocalStorage(ACTIVE_TAB_LEASE_KEY, JSON.stringify({
+      ownerId: TAB_INSTANCE_ID,
+      claimedAt: now,
+      expiresAt: now + ACTIVE_TAB_LEASE_MS,
+      pageUrl: location.href,
+    }));
+  }
+
+  function claimActiveTabLease({ prefer = false } = {}) {
+    if (!isDailyIncomeEnabled()) {
+      activeTabLeader = false;
+      return false;
+    }
+    const lease = loadActiveTabLease();
+    if (lease && lease.ownerId === TAB_INSTANCE_ID && isActiveTabLeaseFresh(lease)) {
+      writeActiveTabLease();
+      activeTabLeader = true;
+      return true;
+    }
+    if (lease && isActiveTabLeaseFresh(lease) && !prefer) {
+      activeTabLeader = false;
+      return false;
+    }
+    writeActiveTabLease();
+    return isActiveTabLeader();
+  }
+
+  function releaseActiveTabLease() {
+    const lease = loadActiveTabLease();
+    if (!lease || lease.ownerId !== TAB_INSTANCE_ID) {
+      activeTabLeader = false;
+      return;
+    }
+    try {
+      localStorage.removeItem(ACTIVE_TAB_LEASE_KEY);
+    } catch (_) {}
+    activeTabLeader = false;
+  }
+
+  function ensureLiveWorkLeadership({ prefer = false } = {}) {
+    const leader = claimActiveTabLease({ prefer });
+    if (leader) installNetworkDiscoveryHooks();
+    return leader;
+  }
+
+  function ensureActiveTabLeaseHeartbeat() {
+    if (activeTabLeaseHeartbeat) return;
+    activeTabLeaseHeartbeat = window.setInterval(() => {
+      if (!isDailyIncomeEnabled()) {
+        releaseActiveTabLease();
+        return;
+      }
+      if (isActiveTabLeader()) {
+        writeActiveTabLease();
+        return;
+      }
+      const lease = loadActiveTabLease();
+      if ((!lease || !isActiveTabLeaseFresh(lease)) && shouldPreferActiveTabLeadership()) {
+        ensureLiveWorkLeadership();
+      }
+    }, ACTIVE_TAB_LEASE_HEARTBEAT_MS);
   }
 
   function getPartsForDate(date, timeZone) {
@@ -1930,6 +2054,7 @@
         }
 
         const res = await origFetch(...args);
+        if (!isActiveTabLeader()) return res;
         try {
           if (interestingUrl(url)) {
             logDiscovery(`fetch ${res.status} ${url}`);
@@ -2025,6 +2150,7 @@
         };
         xhr.addEventListener('loadend', () => {
           try {
+            if (!isActiveTabLeader()) return;
             if (interestingUrl(_url)) {
               logDiscovery(`xhr ${xhr.status} ${_url}`);
               const d = loadDiscovery() || {};
@@ -3514,6 +3640,7 @@
 
   async function syncCurrentMonthLedgerIfNeeded({ force = false } = {}) {
     if (!isDailyIncomeEnabled()) return;
+    if (!ensureLiveWorkLeadership({ prefer: force && shouldPreferActiveTabLeadership() })) return;
     if (monthLedgerSyncInFlight) return;
     if (!force && Date.now() < monthLedgerSyncRetryAt) return;
 
@@ -3550,6 +3677,29 @@
       const dayKey = partsToDayKey(targetDay);
       const dayCache = loadDayCache(cache, dayKey);
       if (dayCache) saveBestLock(dayKey, dayCache);
+      if (!ensureLiveWorkLeadership({ prefer: force && shouldPreferActiveTabLeadership() })) {
+        lastApiFailure = '';
+        lastPagingInfo = '';
+        lastBackgroundError = 'Another Udacity tab is handling live sync.';
+        if (dayCache) {
+          lastStatus = 'ready';
+          lastDataSource = 'cache';
+          render({
+            reviews: { sum: dayCache.reviews || 0, found: true, rowsCounted: dayCache.countedReviews || 0, rowsSeen: dayCache.countedReviews || 0 },
+            questions: { sum: dayCache.questions || 0, found: true, rowsCounted: dayCache.countedQuestions || 0, rowsSeen: dayCache.countedQuestions || 0 },
+            note: '',
+          });
+        } else {
+          lastStatus = 'loading';
+          lastDataSource = 'none';
+          render({
+            reviews: { sum: 0, found: false, rowsCounted: 0, rowsSeen: 0 },
+            questions: { sum: 0, found: false, rowsCounted: 0, rowsSeen: 0 },
+            note: 'Another Udacity tab is handling live sync.',
+          });
+        }
+        return;
+      }
 
       // On the History page, ALWAYS compute from the History UI (and paginate it).
       // This prevents a broken/false-positive API endpoint from overriding correct History totals.
@@ -4002,7 +4152,11 @@
 
   // Install discovery hooks as early as possible. With @run-at document-start,
   // this captures API calls during initial app boot.
-  if (isDailyIncomeEnabled()) installNetworkDiscoveryHooks();
+  if (isDailyIncomeEnabled()) {
+    claimActiveTabLease();
+    ensureActiveTabLeaseHeartbeat();
+    if (isActiveTabLeader()) installNetworkDiscoveryHooks();
+  }
 
   // UI/DOM bootstrapping: on refresh, `document-start` can run before <head>/<body> exist.
   // If we inject too early, the bar can fail to mount and "disappear".
@@ -4018,6 +4172,7 @@
     if (!applyDailyIncomeEnabledState()) return;
 
     uiBooted = true;
+    ensureActiveTabLeaseHeartbeat();
     seedLedgerFromExistingCaches();
     ensureBar();
 
@@ -4070,39 +4225,57 @@
       queueResyncHooksInstalled = true;
       window.addEventListener('pageshow', (event) => {
         if (!isDailyIncomeEnabled()) return;
+        ensureLiveWorkLeadership({ prefer: shouldPreferActiveTabLeadership() });
         // BFCache restores frequently skip normal startup observers; force an immediate recompute.
         scheduleRecompute(!!event?.persisted, 'lifecycle');
         syncCurrentMonthLedgerIfNeeded().catch(() => {});
       });
       window.addEventListener('focus', () => {
         if (!isDailyIncomeEnabled()) return;
+        ensureLiveWorkLeadership({ prefer: true });
         scheduleRecompute(true, 'lifecycle');
         syncCurrentMonthLedgerIfNeeded().catch(() => {});
       });
       document.addEventListener('visibilitychange', () => {
         if (!isDailyIncomeEnabled()) return;
         if (document.visibilityState === 'visible') {
+          ensureLiveWorkLeadership({ prefer: shouldPreferActiveTabLeadership() });
           scheduleRecompute(true, 'lifecycle');
           syncCurrentMonthLedgerIfNeeded().catch(() => {});
         }
       });
+      window.addEventListener('pagehide', () => releaseActiveTabLease());
+      window.addEventListener('beforeunload', () => releaseActiveTabLease());
     }
   }
 
   function handleDailyIncomeToggle() {
     const enabled = applyDailyIncomeEnabledState();
     if (enabled) {
-      installNetworkDiscoveryHooks();
+      ensureActiveTabLeaseHeartbeat();
+      ensureLiveWorkLeadership({ prefer: shouldPreferActiveTabLeadership() });
       seedLedgerFromExistingCaches();
       bootUiIfReady();
       scheduleRecompute(true);
       syncCurrentMonthLedgerIfNeeded({ force: true }).catch(() => {});
+    } else {
+      releaseActiveTabLease();
     }
   }
 
   window.addEventListener(DAILY_INCOME_EVENT, handleDailyIncomeToggle);
   window.addEventListener('storage', (event) => {
     if (event.key === DAILY_INCOME_ENABLED_KEY) handleDailyIncomeToggle();
+    if (event.key === ACTIVE_TAB_LEASE_KEY) {
+      const wasLeader = activeTabLeader;
+      const nowLeader = isActiveTabLeader();
+      if (nowLeader && !wasLeader) installNetworkDiscoveryHooks();
+      scheduleRecompute(true, 'lifecycle');
+      return;
+    }
+    if (event.key === CACHE_KEY || event.key === BEST_LOCK_KEY || event.key === LEDGER_KEY) {
+      scheduleRecompute(false, 'storage');
+    }
   });
 
   // Try immediately, then on DOM milestones, and also via a DOM observer.
