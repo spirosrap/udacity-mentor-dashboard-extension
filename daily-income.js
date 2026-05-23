@@ -37,6 +37,7 @@
   const LARGE_PAGE_SIZE = 500;
   const MONTH_SYNC_RETRY_MS = 15 * 60 * 1000;
   const MONTH_LEDGER_SYNC_VERSION = 2;
+  const COLD_START_HISTORY_RETRY_MS = 10 * 1000;
   const ACTIVE_TAB_LEASE_MS = 20 * 1000;
   const ACTIVE_TAB_LEASE_HEARTBEAT_MS = 5 * 1000;
   const DEFAULT_QUESTION_HISTORY_QUERY = 'query MentorDash_FetchHistory($count: Int, $afterCursor: String) { queue { history(first: $count, after: $afterCursor) { edges { cursor node { createdAt payment { amount currencyCode } type question { id } } } totalCount } } }';
@@ -3660,6 +3661,27 @@
     }
   }
 
+  function renderColdStartZero(dayKey, detail) {
+    const zero = {
+      reviews: 0,
+      questions: 0,
+      countedReviews: 0,
+      countedQuestions: 0,
+    };
+    lastStatus = 'ready';
+    lastDataSource = 'api-empty';
+    lastBackgroundError = detail || lastBackgroundError || 'No completed rows parsed yet; retrying History in the background.';
+    lastApiFailure = lastApiFailure || '0 parsed items';
+    recordLedgerEntry(dayKey, zero, 'api-empty');
+    saveDayCache(dayKey, zero);
+    render({
+      reviews: { sum: 0, found: true, rowsCounted: 0, rowsSeen: 0 },
+      questions: { sum: 0, found: true, rowsCounted: 0, rowsSeen: 0 },
+      note: 'No completed rows parsed yet; retrying History in the background.',
+    });
+    window.setTimeout(() => scheduleRecompute(true, 'cold-start-history-retry'), COLD_START_HISTORY_RETRY_MS);
+  }
+
   async function recomputeAndRender({ force = false } = {}) {
     if (!isDailyIncomeEnabled()) return;
     if (!force && lastRecomputeFinishedAt && Date.now() - lastRecomputeFinishedAt < getRecomputeThrottleMs()) {
@@ -3950,14 +3972,27 @@
           }
           const apiCounts = (mergedTotals.countedReviews || 0) + (mergedTotals.countedQuestions || 0);
 
-          // If API parsing yielded 0 items for the selected day, do NOT show $0.00 as a final answer.
-          // Fall back to History scanning (which can paginate the UI) or background History fetch.
+          // If API parsing yielded 0 items for the selected day, avoid a sticky ERR on cold overview loads.
+          // Show a neutral zero while History warms, then let History/API retries replace it.
           if (apiCounts === 0) {
             lastStatus = 'error';
             lastDataSource = 'api';
             lastPagingInfo = `Paged API: R ${reviewPages || 1}p, Q ${questionPages || 1}p${incomplete ? ' (may be missing more—no next link found)' : ''}.`;
             lastBackgroundError = 'API returned 0 parsed items for the selected day; falling back to History scan.';
             lastApiFailure = '0 parsed items';
+            if (!isHistoryRoute() && !dayCache) {
+              if (!historyDocPromise || force) historyDocPromise = waitForHistoryDoc();
+              historyDocPromise
+                .then((doc) => {
+                  if (doc) {
+                    historyDoc = doc;
+                    scheduleRecompute(true, 'history-warmed');
+                  }
+                })
+                .catch(() => {});
+              renderColdStartZero(dayKey, lastBackgroundError);
+              return;
+            }
             throw new Error('API returned 0 parsed items');
           }
 
@@ -4037,6 +4072,10 @@
       }
 
       if (!historyDoc) {
+        if (!isHistoryRoute() && !dayCache && lastApiFailure === '0 parsed items') {
+          renderColdStartZero(dayKey, lastBackgroundError);
+          return;
+        }
         // If we're on History and couldn't access it, don't silently show cache as "truth".
         // Otherwise it looks like paging isn't adding anything.
         if (dayCache && !isHistoryRoute()) {
