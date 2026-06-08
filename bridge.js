@@ -8,6 +8,8 @@
   const AUTO_REFRESH_EVENT = "udacity-tools:auto-refresh-enabled";
   const DAILY_INCOME_ENABLED_KEY = "udacityMentorDailyIncomeEnabled";
   const DAILY_INCOME_EVENT = "udacity-tools:daily-income-enabled";
+  const SET_PREFS_EVENT = "udacity-tools:set-extension-prefs";
+  const SET_PREFS_RESULT_EVENT = "udacity-tools:set-extension-prefs-result";
   const LEDGER_KEY = "tmUdacityDailyIncomeLedger";
   const LEDGER_TIME_ZONE = "Europe/Athens";
   const DEFAULT_PREFS = Object.freeze({
@@ -293,6 +295,39 @@
     });
   }
 
+  async function handlePageSetPrefs(event) {
+    let message = null;
+    try {
+      message = typeof event?.detail === "string" ? JSON.parse(event.detail) : event?.detail;
+    } catch (_) {
+      message = null;
+    }
+
+    const id = message?.id || "";
+    const current = await getPrefs();
+    const next = {
+      ...current,
+      ...normalizePrefs(message?.prefs || {}),
+    };
+    const saved = await setPrefs(next);
+    applyVisibility(getVisibility());
+    applyAndSyncPrefs(saved.prefs);
+
+    try {
+      window.dispatchEvent(
+        new CustomEvent(SET_PREFS_RESULT_EVENT, {
+          detail: {
+            id,
+            ok: saved.ok,
+            prefs: saved.prefs,
+          },
+        }),
+      );
+    } catch (_) {
+      // ignore
+    }
+  }
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message.type !== "string") return;
 
@@ -313,6 +348,14 @@
       return;
     }
   });
+
+  try {
+    window.addEventListener(SET_PREFS_EVENT, (event) => {
+      handlePageSetPrefs(event);
+    });
+  } catch (_) {
+    // ignore
+  }
 
   try {
     chrome.storage.onChanged.addListener((changes, areaName) => {
