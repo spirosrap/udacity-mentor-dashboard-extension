@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Udacity Mentor Dashboard - Auto Refresh Queues
 // @namespace    local
-// @version      1.0.5
+// @version      1.0.6
 // @description  Refresh Reviews & Questions queues every 5 minutes until Reviews refresh is no longer available (review assigned / out of queue).
 // @match        https://mentor-dashboard.udacity.com/*
 // @run-at       document-idle
@@ -12,7 +12,11 @@
 (function () {
   "use strict";
 
-  const SCRIPT_VERSION = "1.0.5";
+  const SCRIPT_VERSION = "1.0.6";
+  const RUNTIME_KEY = "__UDACITY_AUTO_REFRESH_RUNTIME_V2__";
+  const BADGE_ID = "udacity-mentor-auto-refresh-badge";
+  const LEGACY_BADGE_ID = "tm-udacity-auto-refresh-bar";
+  const LEGACY_BADGE_STYLE_ID = "udacity-mentor-auto-refresh-legacy-style";
   const REFRESH_EVERY_MS = 5 * 60 * 1000; // 5 minutes
   const START_DELAY_MS = 2500;
   const SHOW_BADGE = true; // set to false if you don't want any on-page indicator
@@ -27,8 +31,26 @@
   const USER_ENABLED_EVENT = "udacity-tools:auto-refresh-enabled";
   const STORAGE_VERSION = 1;
 
+  const existingRuntime = window[RUNTIME_KEY];
+  if (existingRuntime && existingRuntime.active) {
+    if (existingRuntime.version === SCRIPT_VERSION) {
+      try {
+        existingRuntime.reconcileBadge();
+      } catch {
+        // The existing runtime remains authoritative even if reconciliation fails.
+      }
+      return;
+    }
+    try {
+      existingRuntime.dispose();
+    } catch {
+      // Continue with the newer runtime if an older version cannot dispose cleanly.
+    }
+  }
+
   let timeoutId = null;
   let resumeIntervalId = null;
+  let startupSyncTimeoutId = null;
   let stopped = false;
   let lastRunAtMs = null;
   let nextRunAtMs = null;
@@ -36,6 +58,34 @@
   let reviewsRefreshSeenOnce = false;
   let missingReviewsStreak = 0;
   let lastStopReason = "";
+
+  function suppressLegacyBadge() {
+    const host = document.head || document.documentElement;
+    if (host) {
+      let style = document.getElementById(LEGACY_BADGE_STYLE_ID);
+      if (!style) {
+        style = document.createElement("style");
+        style.id = LEGACY_BADGE_STYLE_ID;
+        host.appendChild(style);
+      }
+      style.textContent = `#${LEGACY_BADGE_ID} { display: none !important; }`;
+    }
+    for (const legacy of document.querySelectorAll(`#${LEGACY_BADGE_ID}`)) {
+      legacy.style.setProperty("display", "none", "important");
+    }
+  }
+
+  function reconcileBadgeSingleton(preferred = null) {
+    suppressLegacyBadge();
+    const badges = Array.from(document.querySelectorAll(`#${BADGE_ID}`));
+    const keeper = preferred && preferred.isConnected && badges.includes(preferred)
+      ? preferred
+      : badges.find((badge) => badge.isConnected) || null;
+    for (const badge of badges) {
+      if (badge !== keeper) badge.remove();
+    }
+    return keeper;
+  }
 
   // Quick fingerprint for debugging in DevTools:
   // type: window.__UDACITY_AUTO_REFRESH__
@@ -52,6 +102,20 @@
       missingReviewsStreak,
     }),
   };
+  const runtime = {
+    active: true,
+    version: SCRIPT_VERSION,
+    reconcileBadge: () => {
+      badgeEl = reconcileBadgeSingleton(badgeEl);
+      return badgeEl;
+    },
+    dispose: () => disposeRuntime(),
+  };
+  try {
+    window[RUNTIME_KEY] = runtime;
+  } catch {
+    // ignore
+  }
   // Expose on the page window (and top window if accessible) so DevTools can always see it.
   try {
     window.__UDACITY_AUTO_REFRESH__ = api;
@@ -136,9 +200,10 @@
 
   function ensureBadge() {
     if (!SHOW_BADGE) return null;
+    badgeEl = reconcileBadgeSingleton(badgeEl);
     if (badgeEl) return badgeEl;
     const el = document.createElement("div");
-    el.id = "udacity-mentor-auto-refresh-badge";
+    el.id = BADGE_ID;
     el.style.position = "fixed";
     el.style.right = "12px";
     el.style.bottom = "12px";
@@ -153,7 +218,7 @@
     el.style.pointerEvents = "none";
     (document.body || document.documentElement).appendChild(el);
     badgeEl = el;
-    return el;
+    return reconcileBadgeSingleton(badgeEl);
   }
 
   function renderBadge(extra = "") {
@@ -372,6 +437,40 @@
     }, delay);
   }
 
+  function handleBeforeUnload() {
+    persistState();
+  }
+
+  function handleStorage(event) {
+    if (event.key === USER_ENABLED_KEY) enforceUserSetting("synced setting");
+  }
+
+  function handleUserEnabledEvent() {
+    enforceUserSetting("popup toggle");
+  }
+
+  function disposeRuntime() {
+    if (!runtime.active) return;
+    runtime.active = false;
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+    if (resumeIntervalId !== null) {
+      clearInterval(resumeIntervalId);
+      resumeIntervalId = null;
+    }
+    if (startupSyncTimeoutId !== null) {
+      clearTimeout(startupSyncTimeoutId);
+      startupSyncTimeoutId = null;
+    }
+    window.removeEventListener("beforeunload", handleBeforeUnload);
+    window.removeEventListener("storage", handleStorage);
+    window.removeEventListener(USER_ENABLED_EVENT, handleUserEnabledEvent);
+    if (window[RUNTIME_KEY] === runtime) delete window[RUNTIME_KEY];
+    if (window.__UDACITY_AUTO_REFRESH__ === api) delete window.__UDACITY_AUTO_REFRESH__;
+  }
+
   function start() {
     if (timeoutId !== null) return;
     if (!isOnTargetRoute()) {
@@ -396,17 +495,14 @@
     else startResumeWatcher();
 
     // Best-effort persistence on refresh/close.
-    window.addEventListener("beforeunload", () => {
-      persistState();
-    });
-    window.addEventListener("storage", (event) => {
-      if (event.key === USER_ENABLED_KEY) enforceUserSetting("synced setting");
-    });
-    window.addEventListener(USER_ENABLED_EVENT, () => {
-      enforceUserSetting("popup toggle");
-    });
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener(USER_ENABLED_EVENT, handleUserEnabledEvent);
     // Bridge storage sync can land slightly after this script starts.
-    window.setTimeout(() => enforceUserSetting("startup sync"), 1200);
+    startupSyncTimeoutId = window.setTimeout(() => {
+      startupSyncTimeoutId = null;
+      enforceUserSetting("startup sync");
+    }, 1200);
   }
 
   start();

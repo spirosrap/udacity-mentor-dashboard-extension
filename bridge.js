@@ -12,6 +12,7 @@
   const SET_PREFS_RESULT_EVENT = "udacity-tools:set-extension-prefs-result";
   const DAILY_BAR_ID = "udacity-mentor-dashboard-daily-income-bar";
   const LEGACY_DAILY_BAR_ID = "tm-udacity-daily-income-bar";
+  const LEGACY_AUTO_REFRESH_BAR_ID = "tm-udacity-auto-refresh-bar";
   const LEDGER_KEY = "udacityMentorDashboardDailyIncomeLedgerV2";
   const LEDGER_TIME_ZONE = "UTC";
   const DEFAULT_PREFS = Object.freeze({
@@ -114,7 +115,7 @@
       rules.push(`#${DAILY_BAR_ID}, #${LEGACY_DAILY_BAR_ID} { display: none !important; }`);
     }
     if (visibility.hideAutoRefreshBox) {
-      rules.push("#udacity-mentor-auto-refresh-badge { display: none !important; }");
+      rules.push(`#udacity-mentor-auto-refresh-badge, #${LEGACY_AUTO_REFRESH_BAR_ID} { display: none !important; }`);
     }
     style.textContent = rules.join("\n");
   }
