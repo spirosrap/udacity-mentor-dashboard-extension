@@ -10,8 +10,10 @@
   const DAILY_INCOME_EVENT = "udacity-tools:daily-income-enabled";
   const SET_PREFS_EVENT = "udacity-tools:set-extension-prefs";
   const SET_PREFS_RESULT_EVENT = "udacity-tools:set-extension-prefs-result";
-  const LEDGER_KEY = "tmUdacityDailyIncomeLedger";
-  const LEDGER_TIME_ZONE = "Europe/Athens";
+  const DAILY_BAR_ID = "udacity-mentor-dashboard-daily-income-bar";
+  const LEGACY_DAILY_BAR_ID = "tm-udacity-daily-income-bar";
+  const LEDGER_KEY = "udacityMentorDashboardDailyIncomeLedgerV2";
+  const LEDGER_TIME_ZONE = "UTC";
   const DEFAULT_PREFS = Object.freeze({
     dailyIncomeEnabled: false,
     autoRefreshEnabled: true,
@@ -109,7 +111,7 @@
     const style = ensureVisibilityStyle();
     const rules = [];
     if (visibility.hideIncomeBox) {
-      rules.push("#tm-udacity-daily-income-bar { display: none !important; }");
+      rules.push(`#${DAILY_BAR_ID}, #${LEGACY_DAILY_BAR_ID} { display: none !important; }`);
     }
     if (visibility.hideAutoRefreshBox) {
       rules.push("#udacity-mentor-auto-refresh-badge { display: none !important; }");
@@ -166,7 +168,7 @@
   }
 
   function getIncomeState() {
-    const root = document.getElementById("tm-udacity-daily-income-bar");
+    const root = document.getElementById(DAILY_BAR_ID);
     if (!root) {
       return {
         present: false,
@@ -231,10 +233,17 @@
       ledger = null;
     }
 
+    const compatible = !!(
+      ledger
+      && typeof ledger === "object"
+      && ledger.reportingTimeZone === LEDGER_TIME_ZONE
+      && ledger.byDay
+      && typeof ledger.byDay === "object"
+    );
     const today = getTodayDayKey();
     return {
-      present: !!(ledger && typeof ledger === "object" && ledger.byDay && typeof ledger.byDay === "object"),
-      ledger,
+      present: compatible,
+      ledger: compatible ? ledger : null,
       today,
       currentMonth: today.slice(0, 7),
       timeZone: LEDGER_TIME_ZONE,

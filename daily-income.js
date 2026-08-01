@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Udacity Mentor Dashboard — Daily Income Counter
 // @namespace    https://mentor-dashboard.udacity.com/
-// @version      1.1.0
+// @version      1.1.2
 // @description  Sum today's earned income from Reviews + Questions and show totals with completed counts at the bottom of the page.
 // @match        https://mentor-dashboard.udacity.com/queue/*
 // @run-at       document-start
@@ -11,32 +11,38 @@
 (function () {
   'use strict';
 
-  // "Today" timezone for the daily total (uses IANA tz database).
-  // Greece: Europe/Athens (handles DST automatically).
-  const TODAY_TIME_ZONE = 'Europe/Athens';
+  // Udacity earnings roll over on the UTC reporting day, independently of the
+  // reviewer's local timezone.
+  const UDACITY_REPORTING_TIME_ZONE = 'UTC';
+  const TODAY_TIME_ZONE = UDACITY_REPORTING_TIME_ZONE;
 
-  const BAR_ID = 'tm-udacity-daily-income-bar';
-  const IFRAME_ID = 'tm-udacity-history-iframe';
-  const DETAILS_KEY = 'tmUdacityDailyIncomeDetailsOpen';
-  const TARGET_DAY_KEY = 'tmUdacityDailyIncomeTargetDay'; // "YYYY-MM-DD" in TODAY_TIME_ZONE terms
-  const TARGET_DAY_SET_ON_KEY = 'tmUdacityDailyIncomeTargetDaySetOn'; // local day when the target date was chosen
+  const BAR_ID = 'udacity-mentor-dashboard-daily-income-bar';
+  const LEGACY_BAR_ID = 'tm-udacity-daily-income-bar';
+  const LEGACY_BAR_STYLE_ID = 'udacity-mentor-dashboard-legacy-income-style';
+  const IFRAME_ID = 'udacity-mentor-dashboard-history-iframe';
+  const DETAILS_KEY = 'udacityMentorDashboardDailyIncomeDetailsOpenV2';
+  const TARGET_DAY_KEY = 'udacityMentorDashboardDailyIncomeTargetDayV2'; // "YYYY-MM-DD" in TODAY_TIME_ZONE terms
+  const TARGET_DAY_SET_ON_KEY = 'udacityMentorDashboardDailyIncomeTargetDaySetOnV2'; // reporting day when the target date was chosen
   const DAILY_INCOME_ENABLED_KEY = 'udacityMentorDailyIncomeEnabled';
   const DAILY_INCOME_EVENT = 'udacity-tools:daily-income-enabled';
   let lastBackgroundError = '';
   let lastStatus = 'loading'; // loading | ready | error
-  const DISCOVERY_KEY = 'tmUdacityDailyIncomeApiDiscovery';
-  const DISCOVERY_LOG_KEY = 'tmUdacityDailyIncomeApiDiscoveryLog';
+  const DISCOVERY_KEY = 'udacityMentorDashboardDailyIncomeApiDiscoveryV2';
+  const DISCOVERY_LOG_KEY = 'udacityMentorDashboardDailyIncomeApiDiscoveryLogV2';
   const DISCOVERY_LOG_MAX_CHARS = 8000;
-  const CACHE_KEY = 'tmUdacityDailyIncomeCache';
-  const BEST_LOCK_KEY = 'tmUdacityDailyIncomeBestByDay';
-  const LEDGER_KEY = 'tmUdacityDailyIncomeLedger';
-  const ACTIVE_TAB_LEASE_KEY = 'tmUdacityDailyIncomeActiveTabLease';
-  const DAY_TOTALS_SCHEMA_VERSION = 2;
-  const LEDGER_SCHEMA_VERSION = 1;
+  const CACHE_KEY = 'udacityMentorDashboardDailyIncomeCacheV2';
+  const BEST_LOCK_KEY = 'udacityMentorDashboardDailyIncomeBestByDayV2';
+  const LEDGER_KEY = 'udacityMentorDashboardDailyIncomeLedgerV2';
+  const ACTIVE_TAB_LEASE_KEY = 'udacityMentorDashboardDailyIncomeActiveTabLeaseV2';
+  const STORAGE_MIGRATION_KEY = 'udacityMentorDashboardDailyIncomeStorageV2Migrated';
+  const LEGACY_DISCOVERY_KEY = 'tmUdacityDailyIncomeApiDiscovery';
+  const LEGACY_LEDGER_KEY = 'tmUdacityDailyIncomeLedger';
+  const DAY_TOTALS_SCHEMA_VERSION = 3;
+  const LEDGER_SCHEMA_VERSION = 2;
   const LEDGER_MAX_DAYS = 400;
   const LARGE_PAGE_SIZE = 500;
   const MONTH_SYNC_RETRY_MS = 15 * 60 * 1000;
-  const MONTH_LEDGER_SYNC_VERSION = 2;
+  const MONTH_LEDGER_SYNC_VERSION = 3;
   const COLD_START_HISTORY_RETRY_MS = 10 * 1000;
   const ACTIVE_TAB_LEASE_MS = 20 * 1000;
   const ACTIVE_TAB_LEASE_HEARTBEAT_MS = 5 * 1000;
@@ -94,6 +100,41 @@
     december: 12,
     dec: 12,
   });
+
+  function migrateCompatibleLegacyStorage() {
+    try {
+      if (localStorage.getItem(STORAGE_MIGRATION_KEY) === '1') return;
+      if (!localStorage.getItem(DISCOVERY_KEY)) {
+        const discovery = localStorage.getItem(LEGACY_DISCOVERY_KEY);
+        if (discovery) localStorage.setItem(DISCOVERY_KEY, discovery);
+      }
+      if (!localStorage.getItem(LEDGER_KEY)) {
+        const raw = localStorage.getItem(LEGACY_LEDGER_KEY);
+        const ledger = raw ? JSON.parse(raw) : null;
+        if (
+          ledger
+          && Number(ledger.schemaVersion || 0) === LEDGER_SCHEMA_VERSION
+          && ledger.reportingTimeZone === UDACITY_REPORTING_TIME_ZONE
+        ) {
+          localStorage.setItem(LEDGER_KEY, raw);
+        }
+      }
+      localStorage.setItem(STORAGE_MIGRATION_KEY, '1');
+    } catch (_) {}
+  }
+
+  function suppressLegacyIncomeBar() {
+    if (!document.head) return;
+    let style = document.getElementById(LEGACY_BAR_STYLE_ID);
+    if (!style) {
+      style = document.createElement('style');
+      style.id = LEGACY_BAR_STYLE_ID;
+      document.head.appendChild(style);
+    }
+    style.textContent = `#${LEGACY_BAR_ID} { display: none !important; }`;
+  }
+
+  migrateCompatibleLegacyStorage();
 
   function hasDomScaffold() {
     return !!(document.head && document.body);
@@ -1417,7 +1458,9 @@
       const parsed = raw ? JSON.parse(raw) : null;
       const byDay = {};
       const source = (parsed && typeof parsed === 'object') ? parsed : {};
-      const rawByDay = (source.byDay && typeof source.byDay === 'object') ? source.byDay : {};
+      const compatible = Number(source.schemaVersion || 0) === LEDGER_SCHEMA_VERSION
+        && source.reportingTimeZone === UDACITY_REPORTING_TIME_ZONE;
+      const rawByDay = compatible && source.byDay && typeof source.byDay === 'object' ? source.byDay : {};
       for (const [dayKey, entry] of Object.entries(rawByDay)) {
         if (!parseDayKeyToParts(dayKey) || !entry || typeof entry !== 'object') continue;
         const payload = normalizeDayPayload(entry);
@@ -1437,7 +1480,7 @@
         };
       }
       const monthSync = {};
-      const rawMonthSync = (source.monthSync && typeof source.monthSync === 'object') ? source.monthSync : {};
+      const rawMonthSync = compatible && source.monthSync && typeof source.monthSync === 'object' ? source.monthSync : {};
       for (const [monthKey, entry] of Object.entries(rawMonthSync)) {
         if (!/^\d{4}-\d{2}$/.test(monthKey) || !entry || typeof entry !== 'object') continue;
         monthSync[monthKey] = {
@@ -1449,12 +1492,14 @@
       }
       return {
         schemaVersion: LEDGER_SCHEMA_VERSION,
+        reportingTimeZone: UDACITY_REPORTING_TIME_ZONE,
         byDay,
         monthSync,
       };
     } catch (_) {
       return {
         schemaVersion: LEDGER_SCHEMA_VERSION,
+        reportingTimeZone: UDACITY_REPORTING_TIME_ZONE,
         byDay: {},
         monthSync: {},
       };
@@ -1469,6 +1514,7 @@
       for (const k of keys.slice(LEDGER_MAX_DAYS)) delete byDay[k];
       safeSetLocalStorage(LEDGER_KEY, JSON.stringify({
         schemaVersion: LEDGER_SCHEMA_VERSION,
+        reportingTimeZone: UDACITY_REPORTING_TIME_ZONE,
         byDay,
         monthSync: (obj.monthSync && typeof obj.monthSync === 'object') ? obj.monthSync : {},
       }));
@@ -1537,6 +1583,7 @@
       if (!obj || typeof obj !== 'object') return;
       for (const [dayKey, entry] of Object.entries(obj)) {
         if (!parseDayKeyToParts(dayKey) || !entry || typeof entry !== 'object') continue;
+        if (!isDayPayloadSchemaCurrent(entry)) continue;
         seeds.push({ dayKey, entry, source });
       }
     };
@@ -3449,7 +3496,14 @@
     for (const k of keys.slice(31)) delete byDay[k];
     const bestKeys = Object.keys(bestByDay).sort((a, b) => (a < b ? 1 : -1));
     for (const k of bestKeys.slice(31)) delete bestByDay[k];
-    saveCache({ ...existing, at: Date.now(), byDay, bestByDay });
+    saveCache({
+      ...existing,
+      schemaVersion: DAY_TOTALS_SCHEMA_VERSION,
+      reportingTimeZone: UDACITY_REPORTING_TIME_ZONE,
+      at: Date.now(),
+      byDay,
+      bestByDay,
+    });
   }
 
   function shouldOverwriteDayCache(existingDay, nextDay) {
@@ -4208,6 +4262,7 @@
   function bootUiIfReady() {
     if (uiBooted) return;
     if (!hasDomScaffold()) return;
+    suppressLegacyIncomeBar();
     if (!applyDailyIncomeEnabledState()) return;
 
     uiBooted = true;

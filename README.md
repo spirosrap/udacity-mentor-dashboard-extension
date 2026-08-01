@@ -44,7 +44,9 @@ This extension combines both scripts into one package and adds a popup UI:
 - Visibility preferences are saved in extension storage and applied on reload.
 - Low-load defaults: Daily Income starts disabled; Auto Refresh starts enabled.
 - Auto Refresh countdown resets when you manually reload the page.
-- Daily Income also keeps a bounded per-day ledger in page `localStorage` under `tmUdacityDailyIncomeLedger`, seeded from existing cache and refreshed with a once-per-day current-month backfill.
+- Daily Income keeps a bounded per-day ledger in page `localStorage` under `udacityMentorDashboardDailyIncomeLedgerV2`, seeded from existing cache and refreshed with a once-per-day current-month backfill.
+- Daily and monthly ledger boundaries use Udacity's UTC reporting calendar, so a review completed shortly after midnight in Greece remains on the preceding Udacity day until 03:00 EEST (02:00 EET).
+- The Brave extension uses its own bar and storage namespace so legacy page scripts cannot overwrite its totals.
 - The ledger page reads that stored data from the active Udacity tab without refreshing the dashboard.
 
 ## Reliability improvements
